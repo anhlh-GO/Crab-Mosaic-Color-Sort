@@ -32,7 +32,7 @@ jobs:
         run: npx cap add android
       - name: Portrait only, full screen
         run: |
-          sed -i 's/<activity /<activity android:screenOrientation="portrait" /' android/app/src/main/AndroidManifest.xml
+          sed -i 's/<activity/<activity android:screenOrientation="portrait"/' android/app/src/main/AndroidManifest.xml
           grep -n screenOrientation android/app/src/main/AndroidManifest.xml
       - run: npx cap sync android
       - name: Build the APK
