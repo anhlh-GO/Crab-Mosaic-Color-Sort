@@ -1,0 +1,8 @@
+{
+  "appId": "com.anhlhgo.crabmosaic",
+  "appName": "Crab Mosaic Color Sort",
+  "webDir": "dist",
+  "android": {
+    "backgroundColor": "#f7c46c"
+  }
+}

@@ -1,0 +1,54 @@
+# Wraps the web build in a Capacitor Android shell and builds an installable
+# (debug-signed) APK. It is uploaded as a run artifact and attached to the
+# "latest" release so there is always one stable download link.
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: npm ci
+      - run: npm run build
+        env:
+          VITE_STANDALONE: "1"
+      - name: Generate the Android project
+        run: npx cap add android
+      - name: Portrait only, full screen
+        run: |
+          sed -i 's/<activity /<activity android:screenOrientation="portrait" /' android/app/src/main/AndroidManifest.xml
+          grep -n screenOrientation android/app/src/main/AndroidManifest.xml
+      - run: npx cap sync android
+      - name: Build the APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../CrabMosaicColorSort.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrabMosaicColorSort-apk
+          path: CrabMosaicColorSort.apk
+      - name: Publish to the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest CrabMosaicColorSort.apk --title "Latest build" \
+            --notes "Debug APK built from ${{ github.sha }}. Web version: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"

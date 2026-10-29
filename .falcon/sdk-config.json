@@ -1,0 +1,32 @@
+{
+  "//": "Studio-layer numbers for this game, applied by Falcon IDE at publish time. Delete a key to keep its default.",
+  "winCoins": 40,
+  "//winCoins": "Coins awarded for clearing a level.",
+  "x2MinLevel": 20,
+  "//x2MinLevel": "First level (1-based) where the win popup offers a rewarded-ad x2.",
+  "rateLevel": 5,
+  "//rateLevel": "Level after which the rate-us prompt may show; rateGateStars = stars that open the store.",
+  "rateGateStars": 5,
+  "revivePrice": 900,
+  "//revivePrice": "Coins for the first revive; each further one costs revivePriceStep more; maxRevives per round.",
+  "revivePriceStep": 1000,
+  "maxRevives": 1,
+  "boosterBarFromLevel": 5,
+  "//boosterBarFromLevel": "Level (1-based) from which the booster bar is shown, if the game declares boosters.",
+  "ads": {
+    "minLevel": 15,
+    "capSec": 120,
+    "chance": 0.5
+  },
+  "//ads": "Interstitials: from minLevel (1-based), at most one per capSec seconds, shown with probability chance.",
+  "lives": {
+    "max": 5,
+    "regenSec": 1800
+  },
+  "//lives": "max lives; one regenerates every regenSec seconds.",
+  "removeAds": {
+    "productId": "remove_ads",
+    "priceFallback": "$4.99"
+  },
+  "//removeAds": "The shop product that removes ads, and the price shown before the store answers."
+}

@@ -1,0 +1,8 @@
+node_modules
+dist
+*.local
+*.log
+.DS_Store
+
+# Falcon IDE: publish runs and build cache (generated, per machine)
+.falcon-publish
