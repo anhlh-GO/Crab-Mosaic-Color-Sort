@@ -30,6 +30,8 @@ jobs:
           VITE_STANDALONE: "1"
       - name: Generate the Android project
         run: npx cap add android
+      - name: App icon (from assets/icon-*.png)
+        run: npx --yes @capacitor/assets@3.0.5 generate --android
       - name: Portrait only, full screen
         run: |
           sed -i 's/<activity\b/<activity android:screenOrientation="portrait"/' android/app/src/main/AndroidManifest.xml

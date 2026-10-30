@@ -23,6 +23,7 @@ import { LEVELS, dealTiles } from './levels';
 import { PIC_W, PIC_H, loadPictures } from './pictures';
 import FalconSDK from '@falcongames/game-client-sdk';
 import bgUrl from './assets/bg.jpg';
+import appIconUrl from './assets/app_icon.webp';
 import winUrl from './assets/ui/popup_win.webp';
 import loseUrl from './assets/ui/popup_lose.webp';
 import iconAddUrl from './assets/ui/booster_addslot.webp';
@@ -44,6 +45,14 @@ export const LEVEL_COUNT = LEVELS.length;
  * flag unset: there the studio layer provides both.
  */
 const OWN_UI = import.meta.env.DEV || import.meta.env.VITE_STANDALONE === '1';
+
+// the app icon for the browser tab and "add to home screen", inlined into the one-file build
+for (const rel of ['icon', 'apple-touch-icon']) {
+  const link = document.createElement('link');
+  link.rel = rel;
+  link.href = appIconUrl;
+  document.head.appendChild(link);
+}
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
