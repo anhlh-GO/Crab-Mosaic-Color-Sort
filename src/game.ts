@@ -9,7 +9,11 @@
 // picture to win; fill every slot with boxes whose crabs can reach nothing and
 // the round is lost.
 //
-// Boosters (Add Slot, Magic Wand, Magnet) do their work here; at publish the
+// Blockers on boxes: a "?" box hides its colour until tapped; a frozen box
+// can't be tapped until enough other boxes have been sent; chained boxes
+// leave together (both at the front, two free slots).
+//
+// Boosters (Add Slot, Magic Hand, Hammer) do their work here; at publish the
 // studio layer owns their bar, counts and purchases and calls `game.boosters`.
 // In development a stand-in bar is drawn so they can be tried.
 //
@@ -19,7 +23,7 @@
 import { createFalconEvents, type FalconBoosterDef, type FalconGame } from './falcon-game';
 import { segment, type Board } from './segment';
 import { Nav, NAV } from './nav';
-import { LEVELS, dealTiles } from './levels';
+import { LEVELS, dealTiles, type TileDef } from './levels';
 import { PIC_W, PIC_H, loadPictures } from './pictures';
 import FalconSDK from '@falcongames/game-client-sdk';
 import bgUrl from './assets/bg.jpg';
@@ -148,6 +152,14 @@ interface Tile {
   releaseT: number;
   shake: number;
   bounce: number;
+  /** Colour hidden ("?" box) until tapped; the flip that shows it (1 → 0). */
+  hidden: boolean;
+  reveal: number;
+  /** Boxes still to send before it thaws; the thaw burst (1 → 0). */
+  ice: number;
+  thaw: number;
+  /** The box it is chained to. */
+  link: Tile | null;
 }
 interface Crab {
   tile: Tile;
@@ -183,7 +195,7 @@ interface LevelData {
   board: Board;
   original: ImageData;
   nav: Nav;
-  columns: { cls: number; value: number }[][];
+  columns: TileDef[][];
 }
 const cache = new Map<number, LevelData>();
 
@@ -303,6 +315,8 @@ function enterLevel(index: number): void {
   level = index;
   setupLevel();
   playing = true;
+  const intro = BLOCKER_INTROS[level];
+  intro_ = intro ? { ...intro, t: 0 } : null;
   // Fire when the board is READY to play — the studio layer starts the level's clock here.
   events.emit('levelStart', { index: level, difficulty: LEVELS[level].difficulty, levelId: `picture-${level + 1}` });
 }
@@ -339,7 +353,9 @@ function setupLevel(): void {
   regionSpot = board.regions.map(() => null);
   regionPulse = board.regions.map(() => 0);
   slots = new Array(def.slots).fill(null);
-  columns = data.columns.map((col) => col.map((t) => newTile(t.cls, t.value)));
+  const byId = new Map<number, Tile>();
+  columns = data.columns.map((col) => col.map((d) => { const t = newTile(d); if (d.id !== undefined) byId.set(d.id, t); return t; }));
+  data.columns.forEach((col, j) => col.forEach((d, k) => { if (d.link !== undefined) columns[j][k].link = byId.get(d.link) ?? null; }));
   columns.forEach((col, j) => col.forEach((t, k) => { t.x = colX(j); t.y = COL_Y0 + k * COL_PITCH; }));
   crabs = [];
   particles = [];
@@ -357,8 +373,11 @@ function setupLevel(): void {
   slotPops = [];
 }
 
-function newTile(cls: number, value: number): Tile {
-  return { cls, left: value, out: 0, blocked: false, x: 0, y: 0, state: 'col', fromX: 0, fromY: 0, t: 0, releaseT: 0, shake: 0, bounce: 0 };
+function newTile(d: TileDef): Tile {
+  return {
+    cls: d.cls, left: d.value, out: 0, blocked: false, x: 0, y: 0, state: 'col', fromX: 0, fromY: 0, t: 0, releaseT: 0, shake: 0, bounce: 0,
+    hidden: !!d.hidden, reveal: 0, ice: d.ice ?? 0, thaw: 0, link: null,
+  };
 }
 
 // ---- effects ----
@@ -490,6 +509,8 @@ function update(dt: number): void {
   }
   if (!data) return;
 
+  for (const col of columns) for (const t of col) { t.thaw = Math.max(0, t.thaw - dt * 2.5); }
+  for (const t of slots) if (t) t.reveal = Math.max(0, t.reveal - dt * 3.2);
   columns.forEach((col, j) => col.forEach((t, k) => {
     t.x = colX(j);
     t.y += (COL_Y0 + k * COL_PITCH - t.y) * Math.min(1, dt * 14);
@@ -583,7 +604,8 @@ function update(dt: number): void {
   }
   // lost: every slot holds a box that can reach nothing, and no bite is coming that could open more
   const biting = crabs.some((c) => c.state === 'go' || c.state === 'bite');
-  const stuck = !biting && !hammer && slots.every((t) => t && t.state === 'slot' && t.blocked);
+  const busy = slots.some((t) => t && (t.state === 'fly' || !t.blocked));
+  const stuck = !biting && !hammer && !handFx && !busy && !anyTappable();
   stuckT = stuck ? stuckT + dt : 0;
   if (stuckT > 0.6) finish('lose');
 }
@@ -724,6 +746,12 @@ function finish(result: 'win' | 'lose'): void {
 function revive(): boolean {
   if (outcome !== 'lose' || slots.length >= 7) return false;
   slots.push(null);
+  for (const col of columns) {
+    const t = col[0];
+    if (!t) continue;
+    if (t.ice) { t.ice = 0; t.thaw = 1; }
+    if (t.link) unlink(t);
+  }
   outcome = null;
   playing = true;
   return true;
@@ -739,6 +767,11 @@ canvas.addEventListener('pointerdown', (e) => {
   // UI space (bar, tooltip) and world space (the board, which the wand zooms out)
   const ux = (sx - view.ox) / view.scale, uy = sy / view.scale;
   const x = (sx - view.wox) / view.ws, y = (sy - view.woy) / view.ws;
+  if (intro_ && !trans) {
+    // the first tap after the card has landed puts it away
+    if (intro_.t > 0.5) intro_ = null;
+    return;
+  }
   if (OWN_UI && outcome && !paused) {
     // Own UI only: in a Falcon publish the studio layer shows the real win/lose popups.
     popupTap(sx, sy);
@@ -773,10 +806,65 @@ canvas.addEventListener('pointerdown', (e) => {
   for (let j = 0; j < columns.length; j++) {
     const t = columns[j][0];
     if (!t || Math.abs(x - t.x) > TILE_SIZE / 2 + 8 || Math.abs(y - t.y) > TILE_SIZE / 2 + 10) continue;
-    sendToSlot(j, 0);
+    tapFront(j);
     return;
   }
 });
+
+/** The free slots right now. */
+const freeSlots = () => slots.reduce((n, t) => n + (t ? 0 : 1), 0);
+
+/** Can the front box of column `j` go (with its chained partner, if any)? */
+function canSend(j: number): boolean {
+  const t = columns[j][0];
+  if (!t || t.ice > 0) return false;
+  if (!t.link) return freeSlots() >= 1;
+  const p = t.link;
+  return p.ice === 0 && columns.some((c) => c[0] === p) && freeSlots() >= 2;
+}
+
+function anyTappable(): boolean {
+  return columns.some((_, j) => canSend(j));
+}
+
+function tapFront(j: number): void {
+  const t = columns[j][0];
+  if (t.ice > 0) {
+    // frozen: it shivers and sheds a little frost
+    t.shake = 0.35;
+    emit('dust', t.x, t.y - 10, 'rgba(220,245,255,0.95)', 4, 70, 4, 0.4);
+    return;
+  }
+  if (!t.link) { sendToSlot(j, 0); return; }
+  const p = t.link;
+  const j2 = columns.findIndex((c) => c[0] === p);
+  if (j2 < 0 || p.ice > 0 || freeSlots() < 2) {
+    // the chain holds: both boxes tug
+    t.shake = 0.35;
+    p.shake = 0.35;
+    return;
+  }
+  // the lock snaps and both boxes go
+  const mx = (t.x + p.x) / 2, my = (t.y + p.y) / 2;
+  emit('confetti', mx, my, '#ffcf3a', 12, 220, 6, 0.6, 140);
+  emit('star', mx, my, '#fff3a0', 6, 160, 7, 0.45);
+  ring(mx, my, '#ffe27a', 36);
+  t.link = null;
+  p.link = null;
+  sendToSlot(j, 0);
+  sendToSlot(j2, 0);
+}
+
+/** Breaks a chain without sending (booster, revive). */
+function unlink(t: Tile): void {
+  const p = t.link;
+  if (!p) return;
+  const mx = (t.x + p.x) / 2, my = (t.y + p.y) / 2;
+  emit('confetti', mx, my, '#ffcf3a', 10, 200, 6, 0.6, 120);
+  ring(mx, my, '#ffe27a', 30);
+  p.link = null;
+  t.link = null;
+}
 
 /** Box `k` of column `j` flies to the first free slot; shakes when there is none. */
 function sendToSlot(j: number, k: number): boolean {
@@ -789,6 +877,20 @@ function sendToSlot(j: number, k: number): boolean {
   t.fromY = t.y;
   t.t = 0;
   slots[free] = t;
+  if (t.hidden) { t.hidden = false; t.reveal = 1; }
+  t.ice = 0;
+  if (t.link) unlink(t);
+  // every box sent cracks the ice on the others
+  for (const col of columns) for (const b of col) {
+    if (b.ice <= 0) continue;
+    b.ice--;
+    if (b.ice === 0) {
+      b.thaw = 1;
+      emit('shard', b.x, b.y, '#d8f4ff', 9, 220, 6, 0.6, 150);
+      emit('star', b.x, b.y, '#ffffff', 4, 120, 6, 0.4);
+      ring(b.x, b.y, '#e6f8ff', 40);
+    }
+  }
   return true;
 }
 
@@ -858,6 +960,7 @@ function updateHammer(dt: number): void {
     emit('star', h.x, h.y, '#fff3a0', 12, 260, 9, 0.55);
     emit('dust', h.x, h.y, 'rgba(255,250,235,0.9)', 8, 120, 7, 0.5);
     // the boxes of that colour are done for
+    for (const col of columns) for (const t of col) if (t.cls === h.cls && t.link) unlink(t);
     columns = columns.map((col) => col.filter((t) => t.cls !== h.cls));
     slots.forEach((t, i) => {
       if (!t || t.cls !== h.cls) return;
@@ -1114,6 +1217,154 @@ function paintTile(ctx: CanvasRenderingContext2D, x: number, y: number, size: nu
 }
 
 /** An empty slot pressed into the sand. */
+/** Mystery boxes: purple glass with a "?". */
+const MYSTERY = '#7a55d6';
+
+/** A box with its blockers: "?" cover (flipping open when revealed), ice. */
+function drawBox(t: Tile, x: number, y: number, size: number, dim: boolean): void {
+  if (t.reveal > 0) {
+    // the flip: the "?" side turns away, the colour side turns in
+    const showBack = t.reveal > 0.5;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(Math.max(0.05, Math.abs(Math.cos(t.reveal * Math.PI))), 1);
+    drawTile(0, 0, size, showBack ? MYSTERY : colors[t.cls], showBack ? '?' : String(t.left), false);
+    ctx.restore();
+    return;
+  }
+  if (t.hidden) drawTile(x, y, size, MYSTERY, '?', dim);
+  else drawTile(x, y, size, colors[t.cls], String(t.left), dim);
+  if (t.ice > 0 || t.thaw > 0) drawIce(x, y, size, t.ice, t.thaw);
+}
+
+/** A block of ice over a box: frosted glass, cracks that spread as it weakens, its count. */
+function drawIce(x: number, y: number, size: number, n: number, thaw: number): void {
+  const h = size / 2 + 4, r = size * 0.26;
+  ctx.save();
+  if (n <= 0) {
+    // the thaw: the block bursts outwards and fades
+    ctx.globalAlpha *= thaw;
+    ctx.translate(x, y);
+    ctx.scale(1 + (1 - thaw) * 0.35, 1 + (1 - thaw) * 0.35);
+    ctx.translate(-x, -y);
+  }
+  const g = ctx.createLinearGradient(x - h, y - h, x + h, y + h);
+  g.addColorStop(0, 'rgba(240,252,255,0.9)');
+  g.addColorStop(0.5, 'rgba(170,225,250,0.74)');
+  g.addColorStop(1, 'rgba(110,180,235,0.82)');
+  ctx.fillStyle = g;
+  roundRect(ctx, x - h, y - h, h * 2, h * 2 + size * 0.12, r);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(70,140,200,0.55)';
+  ctx.lineWidth = 1.2;
+  roundRect(ctx, x - h + 3, y - h + 3, h * 2 - 6, h * 2 + size * 0.12 - 6, r - 3);
+  ctx.stroke();
+  // glints
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.beginPath();
+  ctx.moveTo(x - h + 7, y - h + 20); ctx.lineTo(x - h + 20, y - h + 7); ctx.lineTo(x - h + 26, y - h + 7); ctx.lineTo(x - h + 7, y - h + 26);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x - h + 7, y - h + 32); ctx.lineTo(x - h + 32, y - h + 7); ctx.lineTo(x - h + 35, y - h + 7); ctx.lineTo(x - h + 7, y - h + 35);
+  ctx.closePath(); ctx.fill();
+  // cracks: more of them the closer it is to breaking
+  const cracks = Math.max(0, 4 - n);
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  ctx.lineWidth = 1.6;
+  ctx.lineCap = 'round';
+  const paths = [[0.2, -0.9, 0.05, -0.3, 0.3, 0.1], [-0.9, 0.3, -0.35, 0.15, -0.1, 0.55], [0.9, 0.5, 0.45, 0.25, 0.5, -0.2], [-0.2, 0.95, -0.05, 0.45, 0.35, 0.6]];
+  for (let c = 0; c < cracks; c++) {
+    const p = paths[c];
+    ctx.beginPath();
+    ctx.moveTo(x + p[0] * h, y + p[1] * h); ctx.lineTo(x + p[2] * h, y + p[3] * h); ctx.lineTo(x + p[4] * h, y + p[5] * h);
+    ctx.stroke();
+  }
+  if (n > 0) {
+    // the count, on a patch of frost that hides the box's own number
+    const fg = ctx.createRadialGradient(x, y, 0, x, y, size * 0.36);
+    fg.addColorStop(0, 'rgba(245,252,255,0.97)');
+    fg.addColorStop(0.7, 'rgba(225,245,255,0.9)');
+    fg.addColorStop(1, 'rgba(225,245,255,0)');
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.arc(x, y + 1, size * 0.36, 0, Math.PI * 2); ctx.fill();
+    ctx.font = `800 ${Math.round(size * 0.44)}px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = size * 0.12;
+    ctx.strokeStyle = '#1f6fb8';
+    ctx.strokeText(String(n), x, y + 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(String(n), x, y + 2);
+    // a little snowflake in the corner
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.8;
+    const sx = x + h - 11, sy = y - h + 11;
+    for (let a = 0; a < 3; a++) {
+      const u = (a / 3) * Math.PI;
+      ctx.beginPath(); ctx.moveTo(sx - Math.cos(u) * 6, sy - Math.sin(u) * 6); ctx.lineTo(sx + Math.cos(u) * 6, sy + Math.sin(u) * 6); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+/** A gold chain across the gap between two boxes, a padlock hanging in the middle. */
+function drawChain(x0: number, y0: number, x1: number, y1: number): void {
+  // from just inside one box's edge to just inside the other's, low on the boxes
+  const inset = TILE_SIZE / 2 - 10;
+  const ax = x0 + inset, ay = y0 + 12, bx = x1 - inset, by = y1 + 12;
+  const len = Math.hypot(bx - ax, by - ay), ang = Math.atan2(by - ay, bx - ax);
+  const n = Math.max(3, Math.round(len / 11));
+  ctx.save();
+  ctx.translate(ax, ay);
+  ctx.rotate(ang);
+  for (let i = 0; i <= n; i++) {
+    const cx = (len * i) / n;
+    const flat = i % 2 === 0;
+    ctx.beginPath();
+    ctx.ellipse(cx, 0, flat ? 9 : 7, flat ? 5.5 : 2.8, 0, 0, Math.PI * 2);
+    ctx.lineWidth = 5.4;
+    ctx.strokeStyle = '#6b3f00';
+    ctx.stroke();
+    ctx.lineWidth = 3.2;
+    ctx.strokeStyle = flat ? '#ffd23f' : '#eba31c';
+    ctx.stroke();
+    if (flat) {
+      ctx.strokeStyle = 'rgba(255,250,215,0.95)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.ellipse(cx, -1.2, 6.5, 3, 0, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
+    }
+  }
+  ctx.restore();
+  // the padlock hangs from the middle link
+  const px = (ax + bx) / 2, py = (ay + by) / 2 + 6;
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = '#6b3f00';
+  ctx.beginPath(); ctx.arc(px, py - 4, 8, Math.PI, 0); ctx.stroke();
+  ctx.lineWidth = 2.8;
+  ctx.strokeStyle = '#e4e8f0';
+  ctx.beginPath(); ctx.arc(px, py - 4, 8, Math.PI, 0); ctx.stroke();
+  const lg = ctx.createLinearGradient(0, py - 4, 0, py + 16);
+  lg.addColorStop(0, '#fff09a');
+  lg.addColorStop(0.5, '#ffc72e');
+  lg.addColorStop(1, '#d98a0a');
+  ctx.fillStyle = lg;
+  ctx.strokeStyle = '#6b3f00';
+  ctx.lineWidth = 2.4;
+  roundRect(ctx, px - 12, py - 4, 24, 20, 5);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  roundRect(ctx, px - 9, py - 2, 18, 5, 2.5);
+  ctx.fill();
+  ctx.fillStyle = '#5a3400';
+  ctx.beginPath(); ctx.arc(px, py + 6, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillRect(px - 1.4, py + 6, 2.8, 6);
+}
+
 function drawSlot(x: number, y: number): void {
   const s = SLOT_SIZE, h = s / 2, r = s * 0.24;
   ctx.fillStyle = 'rgba(255,248,235,0.95)';
@@ -1478,17 +1729,25 @@ function draw(): void {
       ctx.save();
       ctx.translate(t.x + sx, t.y - lift);
       ctx.scale(1 + b, 1 - b + (lift ? 0.04 : 0));
-      drawTile(0, 0, TILE_SIZE, colors[t.cls], String(t.left), k > 0 && !wandOut);
+      drawBox(t, 0, 0, TILE_SIZE, k > 0 && !wandOut);
       ctx.restore();
     }
   });
+  // chains over the boxes they hold
+  columns.forEach((col) => col.forEach((t, k) => {
+    const p = t.link;
+    if (!p || k >= maxRows) return;
+    const kp = columns.findIndex((c) => c.includes(p));
+    if (kp < 0 || columns[kp].indexOf(p) >= maxRows || p.x < t.x) return;
+    drawChain(t.x, t.y - handLift(t), p.x, p.y - handLift(p));
+  }));
   ctx.globalAlpha = 1;
 
   // flying boxes on top, growing as they lift
   slots.forEach((t) => {
     if (!t || t.state !== 'fly') return;
     const s = SLOT_SIZE + (TILE_SIZE - SLOT_SIZE) * (1 - t.t) + Math.sin(t.t * Math.PI) * 8;
-    drawTile(t.x, t.y, s, colors[t.cls], String(t.left), false);
+    drawBox(t, t.x, t.y, s, false);
   });
 
   for (const c of crabs) if (c.state !== 'drop') drawCrab(c);
@@ -1502,8 +1761,66 @@ function draw(): void {
   ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * view.ox, 0);
   if (OWN_UI) drawDevBoosters();
   if (OWN_UI && outcome) drawPopup(W, H, dpr);
+  if (intro_ && !trans) drawIntro(W, H, dpr);
   drawWave(W, H, dpr, scale);
   drawTaps(dpr);
+}
+
+// ---- blocker intro cards ----
+interface Intro { kind: 'mystery' | 'ice' | 'chain'; title: string; text: string[] }
+/** The level (0-based) where each blocker first appears. */
+const BLOCKER_INTROS: Record<number, Intro> = {
+  20: { kind: 'mystery', title: 'Mystery Box', text: ['Its color stays hidden', 'until you tap it!'] },
+  25: { kind: 'ice', title: 'Frozen Box', text: ['Send other boxes to crack the ice.', 'The number shows how many.'] },
+  30: { kind: 'chain', title: 'Chained Boxes', text: ['Both must be at the front,', 'with two free slots, to go together.'] },
+};
+let intro_: (Intro & { t: number }) | null = null;
+
+function drawIntro(W: number, H: number, dpr: number): void {
+  const it = intro_!;
+  const k = easeOutBack(Math.min(1, it.t / 0.4));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = `rgba(20,12,6,${0.55 * Math.min(1, it.t / 0.25)})`;
+  ctx.fillRect(0, 0, W, H);
+  const s = Math.min(W / DW, H / 900);
+  ctx.setTransform(dpr * s * k, 0, 0, dpr * s * k, dpr * (W / 2), dpr * (H * 0.45));
+  // the card: cream, gold rim, a ribbon for the title
+  const cw = 380, ch = 330;
+  ctx.fillStyle = 'rgba(60,30,5,0.35)';
+  roundRect(ctx, -cw / 2, -ch / 2 + 8, cw, ch, 28); ctx.fill();
+  ctx.fillStyle = '#fff6e4';
+  roundRect(ctx, -cw / 2, -ch / 2, cw, ch, 28); ctx.fill();
+  ctx.strokeStyle = '#f0b43c'; ctx.lineWidth = 6; ctx.stroke();
+  ctx.fillStyle = '#f2a531';
+  roundRect(ctx, -cw / 2 + 30, -ch / 2 - 26, cw - 60, 56, 20); ctx.fill();
+  ctx.strokeStyle = '#a8600c'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.font = `800 30px ${FONT}`;
+  ctx.lineWidth = 7; ctx.strokeStyle = '#7a3f00'; ctx.strokeText('NEW!  ' + it.title, 0, -ch / 2 + 2);
+  ctx.fillStyle = '#ffffff'; ctx.fillText('NEW!  ' + it.title, 0, -ch / 2 + 2);
+  // the blocker itself, bobbing
+  const bob = Math.sin(it.t * 4) * 4;
+  const demo = (cls: number, extra: Partial<Tile>) => ({ ...newTile({ cls, value: 15 }), ...extra }) as Tile;
+  const c0 = 0, c1 = Math.min(1, colors.length - 1);
+  if (it.kind === 'mystery') drawBox(demo(c0, { hidden: true }), 0, -40 + bob, 70, false);
+  if (it.kind === 'ice') drawBox(demo(c0, { ice: 3 }), 0, -40 + bob, 70, false);
+  if (it.kind === 'chain') {
+    drawBox(demo(c0, {}), -50, -40 + bob, 66, false);
+    drawBox(demo(c1, {}), 50, -40 + bob, 66, false);
+    drawChain(-50, -40 + bob, 50, -40 + bob);
+  }
+  ctx.fillStyle = '#5b3a1a';
+  ctx.font = `700 20px ${FONT}`;
+  it.text.forEach((line, i) => ctx.fillText(line, 0, 50 + i * 28));
+  if (it.t > 0.5) {
+    ctx.globalAlpha = 0.6 + 0.4 * Math.sin(it.t * 5);
+    ctx.fillStyle = '#a8600c';
+    ctx.font = `800 18px ${FONT}`;
+    ctx.fillText('Tap to continue', 0, ch / 2 - 26);
+    ctx.globalAlpha = 1;
+  }
 }
 
 // ---- sand, prints and the wave ----
@@ -2036,6 +2353,7 @@ function frame(now: number): void {
     updateWave(dt);
   }
   popupT = outcome ? popupT + dt : 0;
+  if (intro_) intro_.t += dt;
   for (const [id, t] of presses) { if (t > 1.2) presses.delete(id); else presses.set(id, t + dt); }
   for (const p of taps) p.t += dt;
   if (taps.length) taps = taps.filter((p) => p.t < 0.4);
