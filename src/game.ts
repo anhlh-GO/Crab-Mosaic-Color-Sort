@@ -21,7 +21,20 @@ import { segment, type Board } from './segment';
 import { Nav, NAV } from './nav';
 import { LEVELS, dealTiles } from './levels';
 import { PIC_W, PIC_H, loadPictures } from './pictures';
+import FalconSDK from '@falcongames/game-client-sdk';
 import bgUrl from './assets/bg.jpg';
+import winUrl from './assets/ui/popup_win.webp';
+import loseUrl from './assets/ui/popup_lose.webp';
+import iconAddUrl from './assets/ui/booster_addslot.webp';
+import iconHandUrl from './assets/ui/booster_magichand.webp';
+import iconHammerUrl from './assets/ui/booster_vacuum.webp';
+import btnNextUrl from './assets/ui/btn_next.webp';
+import btnAdUrl from './assets/ui/btn_ad.webp';
+import btnGemsUrl from './assets/ui/btn_gems.webp';
+import btnCloseUrl from './assets/ui/btn_close.webp';
+import fxCardsUrl from './assets/ui/fx_addslot.webp';
+import fxHandUrl from './assets/ui/fx_magichand.webp';
+import fxHammerUrl from './assets/ui/fx_vacuum.webp';
 
 export const LEVEL_COUNT = LEVELS.length;
 
@@ -73,8 +86,8 @@ const BAR_H = 100; // room kept at the bottom for the booster bar
 type BoosterKey = 'addslot' | 'magichand' | 'vacuum';
 const BOOSTERS: (FalconBoosterDef & { key: BoosterKey })[] = [
   { key: 'addslot', title: 'Add Slot', desc: 'Add an extra slot to the queue', price: 1200, qty: 3, unlock: 5 },
-  { key: 'magichand', title: 'Magic Wand', desc: 'Pick any box from the grid', price: 1500, qty: 3, unlock: 8 },
-  { key: 'vacuum', title: 'Magnet', desc: 'Clear all pieces of a color', price: 2100, qty: 3, unlock: 11 },
+  { key: 'magichand', title: 'Magic Hand', desc: 'Pick any box from the grid', price: 1500, qty: 3, unlock: 8 },
+  { key: 'vacuum', title: 'Hammer', desc: 'Smash all pieces of a color', price: 2100, qty: 3, unlock: 11 },
 ];
 const MAX_SLOTS = 7;
 
@@ -91,7 +104,19 @@ const loadImage = (src: string) =>
     img.src = src;
   });
 let bgImg: HTMLImageElement | null = null;
-const ready = Promise.all([loadImage(bgUrl), loadPictures()]).then(([bg]) => {
+/** Art for the game's own UI (win / slots-full popups, booster buttons). */
+type UiArt = 'win' | 'lose' | BoosterKey | 'next' | 'ad' | 'gems' | 'close' | 'cards' | 'hand' | 'hammer';
+const ui: Record<UiArt, HTMLImageElement | null> = {
+  win: null, lose: null, addslot: null, magichand: null, vacuum: null,
+  next: null, ad: null, gems: null, close: null, cards: null, hand: null, hammer: null,
+};
+const uiLoads = Promise.all(([
+  ['win', winUrl], ['lose', loseUrl], ['addslot', iconAddUrl], ['magichand', iconHandUrl], ['vacuum', iconHammerUrl],
+  ['next', btnNextUrl], ['ad', btnAdUrl], ['gems', btnGemsUrl], ['close', btnCloseUrl],
+  ['cards', fxCardsUrl], ['hand', fxHandUrl], ['hammer', fxHammerUrl],
+] as const)
+  .map(([k, url]) => loadImage(url).then((img) => { ui[k] = img; })));
+const ready = Promise.all([loadImage(bgUrl), loadPictures(), uiLoads]).then(([bg]) => {
   bgImg = bg;
 });
 
@@ -138,7 +163,6 @@ interface Crab {
   pace: number;
   lane: number;
 }
-interface Print { x: number; y: number; ang: number; foot: number; life: number }
 type Kind = 'confetti' | 'dust' | 'shard' | 'star' | 'ring';
 interface Particle {
   kind: Kind; x: number; y: number; vx: number; vy: number; life: number; max: number;
@@ -162,7 +186,8 @@ let colors: string[] = [];
 let picCanvas = document.createElement('canvas');
 let picCtx = picCanvas.getContext('2d')!;
 let picData: ImageData | null = null;
-let picDirty = false;
+/** Bounding box of picture pixels changed since the last upload; x1 < x0 = clean. */
+const picDirty = { x0: PIC_W, y0: PIC_H, x1: -1, y1: -1 };
 let pstate = new Uint8Array(0);
 let eatenCount = 0;
 let regionLeft: number[] = [];
@@ -174,20 +199,43 @@ let slots: (Tile | null)[] = [];
 let crabs: Crab[] = [];
 let particles: Particle[] = [];
 let pops: Pop[] = [];
-let prints: Print[] = [];
-/** A booster waiting for its pick, how far the wand's zoom-out has gone, and the magnet at work. */
+/**
+ * Crab prints live in one layer in world units: each is stamped once and the
+ * whole layer fades a little every PRINT_FADE seconds, so a beach full of
+ * prints costs one drawImage per frame.
+ */
+const PRINT_RES = 2; // layer pixels per world unit
+const PRINT_BOX = { x: -40, y: 0, w: DW + 80, h: 780 };
+const PRINT_FADE = 0.1;
+const printLayer = document.createElement('canvas');
+printLayer.width = PRINT_BOX.w * PRINT_RES;
+printLayer.height = PRINT_BOX.h * PRINT_RES;
+const printCtx = printLayer.getContext('2d')!;
+printCtx.setTransform(PRINT_RES, 0, 0, PRINT_RES, -PRINT_BOX.x * PRINT_RES, -PRINT_BOX.y * PRINT_RES);
+let printFadeT = 0;
+/** Seconds the win / lose popup has been up; a revive is waiting on an ad. */
+let popupT = 0;
+let reviveBusy = false;
+/** Pressed buttons (seconds since the press), and tap ripples on screen (CSS px). */
+const presses = new Map<string, number>();
+let taps: { x: number; y: number; t: number }[] = [];
+let lastPopupAction = -1;
+/** The finished level's picture, whole, for the win popup. */
+let winPic: { level: number; canvas: HTMLCanvasElement } | null = null;
+/** A booster waiting for its pick. */
 let armed: 'magichand' | 'vacuum' | null = null;
-/** Camera: 0..1 toward the wand's zoom-out / the magnet's zoom-in. */
+/** Camera: 0..1 toward the hand's zoom-out / the hammer's zoom-in. */
 let wandT = 0;
 let magT = 0;
-/** The wand at work on a picked box. */
-let wandFx: { tile: Tile; t: number; struck: boolean; sent: boolean } | null = null;
-/** A bit of a pulled piece: jiggles in place, then flies into the magnet's puff. */
-interface Shard { x: number; y: number; color: string; size: number; rot: number; delay: number }
-let magnet: {
-  t: number; fromX: number; fromY: number; shards: Shard[]; arrived: number; exitAt: number;
-} | null = null;
-let slotPops: { i: number; t: number }[] = [];
+/** The glove at work on a picked box. */
+let handFx: { tile: Tile; t: number; struck: boolean; sent: boolean } | null = null;
+/** A piece the hammer breaks, and when its shards fly. */
+interface Burst { piece: number; at: number }
+let hammer: { t: number; x: number; y: number; cls: number; bursts: Burst[]; hit: boolean } | null = null;
+/** Screen shake, 0..1. */
+let shake = 0;
+/** A slot the booster adds: its card flies in from the button (t < 0), then the slot pops. */
+let slotPops: { i: number; t: number; fromX: number; fromY: number }[] = [];
 /** Development stand-in for the studio's booster wallet. */
 const devCounts: Record<BoosterKey, number> = { addslot: 3, magichand: 3, vacuum: 3 };
 let holePulse = 0;
@@ -275,7 +323,7 @@ function setupLevel(): void {
   picCanvas.height = PIC_H;
   picCtx = picCanvas.getContext('2d')!;
   picData = new ImageData(new Uint8ClampedArray(data.original.data), PIC_W, PIC_H);
-  picDirty = true;
+  markDirty(null);
   pstate = new Uint8Array(board.pieces.length);
   eatenCount = 0;
   regionLeft = board.regions.map((r) => r.pieces.length);
@@ -287,15 +335,16 @@ function setupLevel(): void {
   crabs = [];
   particles = [];
   pops = [];
-  prints = [];
+  clearPrints();
   holePulse = 0;
   stuckT = 0;
   winT = -1;
   armed = null;
   wandT = 0;
   magT = 0;
-  wandFx = null;
-  magnet = null;
+  handFx = null;
+  hammer = null;
+  shake = 0;
   slotPops = [];
 }
 
@@ -406,15 +455,30 @@ function bite(c: Crab): void {
   }
   const px = picData!.data;
   for (const i of piece.pixels) px[i * 4 + 3] = 0;
-  picDirty = true;
+  markDirty(piece.pixels);
   c.shard = shardOf(p);
   emit('shard', c.x, c.y, colors[piece.cls], 5, 90, 4, 0.45, 60);
   emit('star', c.x, c.y, '#ffffff', 1, 20, 5, 0.3);
 }
 
+/** Grows the dirty box over `pixels` (null = the whole picture). */
+function markDirty(pixels: Uint32Array | null): void {
+  if (!pixels) { Object.assign(picDirty, { x0: 0, y0: 0, x1: PIC_W - 1, y1: PIC_H - 1 }); return; }
+  for (const i of pixels) {
+    const x = i % PIC_W, y = (i / PIC_W) | 0;
+    if (x < picDirty.x0) picDirty.x0 = x;
+    if (x > picDirty.x1) picDirty.x1 = x;
+    if (y < picDirty.y0) picDirty.y0 = y;
+    if (y > picDirty.y1) picDirty.y1 = y;
+  }
+}
+
 // ---- update ----
 function update(dt: number): void {
-  if (picDirty && picData) { picCtx.putImageData(picData, 0, 0); picDirty = false; }
+  if (picDirty.x1 >= picDirty.x0 && picData) {
+    picCtx.putImageData(picData, 0, 0, picDirty.x0, picDirty.y0, picDirty.x1 - picDirty.x0 + 1, picDirty.y1 - picDirty.y0 + 1);
+    Object.assign(picDirty, { x0: PIC_W, y0: PIC_H, x1: -1, y1: -1 });
+  }
   if (!data) return;
 
   columns.forEach((col, j) => col.forEach((t, k) => {
@@ -474,19 +538,29 @@ function update(dt: number): void {
   particles = particles.filter((p) => p.life > 0);
   for (const p of pops) p.t += dt;
   pops = pops.filter((p) => p.t < 0.32);
-  for (const p of prints) p.life -= dt;
-  if (prints.length && prints[0].life <= 0) prints = prints.filter((p) => p.life > 0);
+  fadePrints(dt);
   holePulse = Math.max(0, holePulse - dt * 5);
-  wandT = Math.max(0, Math.min(1, wandT + (armed === 'magichand' || wandFx ? dt : -dt) / 0.3));
-  magT = Math.max(0, Math.min(1, magT + (armed === 'vacuum' || (magnet && magnet.t < MAG_POP) ? dt : -dt) / 0.3));
-  updateWand(dt);
-  for (const p of slotPops) p.t += dt;
+  wandT = Math.max(0, Math.min(1, wandT + (armed === 'magichand' || handFx ? dt : -dt) / 0.3));
+  magT = Math.max(0, Math.min(1, magT + (armed === 'vacuum' || (hammer && hammer.t < HAM_HIT + 0.35) ? dt : -dt) / 0.3));
+  shake = Math.max(0, shake - dt * 3.2);
+  updateHand(dt);
+  for (const p of slotPops) {
+    const was = p.t;
+    p.t += dt;
+    if (was < 0 && p.t >= 0) {
+      // the card lands: the slot pops in
+      const x = slotX(p.i);
+      ring(x, SLOT_Y, '#ffffff', 40);
+      emit('star', x, SLOT_Y, '#fff3a0', 9, 170, 7, 0.5);
+      emit('dust', x, SLOT_Y + 24, 'rgba(255,240,215,0.9)', 5, 60, 5, 0.4);
+    }
+  }
   slotPops = slotPops.filter((p) => p.t < 0.5);
-  updateMagnet(dt);
-  regionPulse = regionPulse.map((v) => Math.max(0, v - dt * 5));
+  updateHammer(dt);
+  for (let r = 0; r < regionPulse.length; r++) if (regionPulse[r] > 0) regionPulse[r] = Math.max(0, regionPulse[r] - dt * 5);
 
   if (!playing) return;
-  if (eatenCount === data.board.pieces.length && crabs.length === 0) {
+  if (eatenCount === data.board.pieces.length && crabs.length === 0 && !hammer) {
     if (winT < 0) {
       winT = 1.1;
       for (let k = 0; k < 70; k++) {
@@ -500,7 +574,7 @@ function update(dt: number): void {
   }
   // lost: every slot holds a box that can reach nothing, and no bite is coming that could open more
   const biting = crabs.some((c) => c.state === 'go' || c.state === 'bite');
-  const stuck = !biting && slots.every((t) => t && t.state === 'slot' && t.blocked);
+  const stuck = !biting && !hammer && slots.every((t) => t && t.state === 'slot' && t.blocked);
   stuckT = stuck ? stuckT + dt : 0;
   if (stuckT > 0.6) finish('lose');
 }
@@ -560,7 +634,7 @@ function stepCrab(c: Crab, dt: number): boolean {
   if (c.walked >= STEP && c.age > HOP_TIME && onSand(c.x, c.y)) {
     c.walked = 0;
     c.foot ^= 1;
-    if (prints.length < 1800) prints.push({ x: c.x, y: c.y, ang: c.ang, foot: c.foot, life: PRINT_LIFE });
+    stampPrint(c.x, c.y, c.ang, c.foot);
   }
   return false;
 }
@@ -652,15 +726,16 @@ let view = { scale: 1, ox: 0, dh: 960, ws: 1, wox: 0, woy: 0 };
 canvas.addEventListener('pointerdown', (e) => {
   const r = canvas.getBoundingClientRect();
   const sx = e.clientX - r.left, sy = e.clientY - r.top;
+  taps.push({ x: sx, y: sy, t: 0 });
   // UI space (bar, tooltip) and world space (the board, which the wand zooms out)
   const ux = (sx - view.ox) / view.scale, uy = sy / view.scale;
   const x = (sx - view.wox) / view.ws, y = (sy - view.woy) / view.ws;
   if (OWN_UI && outcome && !paused) {
     // Own UI only: in a Falcon publish the studio layer shows the real win/lose popups.
-    startLevel(outcome === 'win' ? (level + 1) % LEVEL_COUNT : level);
+    popupTap(sx, sy);
     return;
   }
-  if (!playing || paused || trans || magnet || wandFx) return;
+  if (!playing || paused || trans || hammer || handFx) return;
   if (OWN_UI && devBoosterTap(ux, uy)) return;
   if (armed === 'magichand') {
     // any box in any row
@@ -669,9 +744,9 @@ canvas.addEventListener('pointerdown', (e) => {
         const t = columns[j][k];
         if (Math.abs(x - t.x) > TILE_SIZE / 2 + 4 || Math.abs(y - t.y) > TILE_SIZE / 2 + 4) continue;
         if (slots.indexOf(null) < 0) { t.shake = 0.35; return; }
-        // the wand comes down on it; the box leaves once it has been struck
+        // the glove comes down on it; the box leaves once it has been lifted
         armed = null;
-        wandFx = { tile: t, t: 0, struck: false, sent: false };
+        handFx = { tile: t, t: 0, struck: false, sent: false };
         spendDev('magichand');
         return;
       }
@@ -682,7 +757,7 @@ canvas.addEventListener('pointerdown', (e) => {
     if (x >= PIC_X && x < PIC_X + PW && y >= PIC_Y && y < PIC_Y + PH) {
       const px = Math.min(PIC_W - 1, Math.floor((x - PIC_X) / PIC_S)), py = Math.min(PIC_H - 1, Math.floor((y - PIC_Y) / PIC_S));
       const cls = data!.board.pieces[data!.board.pieceOf[py * PIC_W + px]].cls;
-      if (useMagnet(cls, x, y)) { armed = null; spendDev('vacuum'); }
+      if (useHammer(cls, x, y)) { armed = null; spendDev('vacuum'); }
     }
     return;
   }
@@ -710,14 +785,13 @@ function sendToSlot(j: number, k: number): boolean {
 
 // ---- boosters ----
 function activateBooster(key: string): boolean {
-  if (!data || !playing || paused || trans || magnet || wandFx) return false;
+  if (!data || !playing || paused || trans || hammer || handFx) return false;
   if (key === 'addslot') {
     if (slots.length >= MAX_SLOTS) return false;
     slots.push(null);
-    slotPops.push({ i: slots.length - 1, t: 0 });
-    const x = slotX(slots.length - 1);
-    ring(x, SLOT_Y, '#ffffff', 40);
-    emit('star', x, SLOT_Y, '#fff3a0', 8, 160, 7, 0.5);
+    // from the Add Slot button (UI space) to world space
+    const sx = view.ox + barX(0) * view.scale, sy = barY() * view.scale;
+    slotPops.push({ i: slots.length - 1, t: -ADD_FLY, fromX: (sx - view.wox) / view.ws, fromY: (sy - view.woy) / view.ws });
     return true;
   }
   if (key === 'magichand') {
@@ -732,134 +806,153 @@ function activateBooster(key: string): boolean {
   return false;
 }
 
-// magnet timeline (seconds): pop at the tap, glide to the rest spot, pull, drop down the hole
-const MAG_POP = 0.32;
-const MAG_GLIDE = 0.72;
-const MAG_FLY = 0.34;
-const MAG_EXIT = 0.38;
-const magRest = (): Pt => ({ x: PIC_X + PW / 2, y: PIC_Y + PH - 30 });
-const magPuff = (): Pt => { const r = magRest(); return { x: r.x, y: r.y - 46 }; };
+const ADD_FLY = 0.5;
+
+// hammer timeline (seconds): pops up raised, winds back, smashes, recoils, fades
+const HAM_POP = 0.22;
+const HAM_WIND = 0.46;
+const HAM_HIT = 0.6;
+const HAM_END = 1.15;
 
 /**
- * Every piece of colour `cls` still on the picture breaks into shards that the
- * magnet pulls in, and the boxes of that colour go with it: their crabs have
- * nothing left to eat. Crabs already out finish their bites. False when the colour is gone.
+ * The hammer comes down where the player tapped: every piece of colour `cls`
+ * breaks (rippling out from the hit) and the boxes of that colour go with it —
+ * their crabs have nothing left to eat. The outcome is decided now; the pieces
+ * stay on the glass until the blow lands. False when the colour is gone.
  */
-function useMagnet(cls: number, x: number, y: number): boolean {
+function useHammer(cls: number, x: number, y: number): boolean {
   const { board, nav } = data!;
-  const shards: Shard[] = [];
-  const spread = LEVELS[level].cell * PIC_S * 0.3;
+  const bursts: Burst[] = [];
   board.pieces.forEach((piece, p) => {
     if (pstate[p] !== INTACT || piece.cls !== cls) return;
     pstate[p] = EATEN;
     eatenCount++;
     nav.clear(p);
-    const r = piece.region;
-    regionLeft[r]--;
-    regionSpot[r] = null;
-    const px = picData!.data;
-    for (const i of piece.pixels) px[i * 4 + 3] = 0;
     const at = picPoint(p);
-    for (let k = 0; k < 2; k++) {
-      shards.push({
-        x: at.x + (Math.random() - 0.5) * spread * 2, y: at.y + (Math.random() - 0.5) * spread * 2,
-        color: shade(colors[cls], (Math.random() - 0.3) * 0.35), size: 6 + Math.random() * 4, rot: Math.random() * 6, delay: 0,
-      });
-    }
+    bursts.push({ piece: p, at: HAM_HIT + Math.min(0.45, Math.hypot(at.x - x, at.y - y) / 900) });
   });
-  if (!shards.length) return false;
-  picDirty = true;
-  // nearest to the puff go first
-  const puff = magPuff();
-  shards.sort((a, b) => Math.hypot(a.x - puff.x, a.y - puff.y) - Math.hypot(b.x - puff.x, b.y - puff.y));
-  const pull = Math.min(1.1, 0.4 + shards.length / 300);
-  shards.forEach((sh, i) => { sh.delay = MAG_GLIDE - 0.1 + (i / shards.length) * pull + Math.random() * 0.08; });
-  columns = columns.map((col) => col.filter((t) => t.cls !== cls));
-  slots.forEach((t, i) => {
-    if (!t || t.cls !== cls) return;
-    t.left = 0;
-    slots[i] = null;
-    pops.push({ x: t.x, y: t.y, t: 0, cls: t.cls });
-    emit('confetti', t.x, t.y, colors[t.cls], 12, 260, 6, 0.7, 160);
-  });
-  const exitAt = Math.max(...shards.map((sh) => sh.delay)) + MAG_FLY + 0.15;
-  magnet = { t: 0, fromX: x, fromY: y, shards, arrived: 0, exitAt };
+  if (!bursts.length) return false;
+  bursts.sort((a, b) => a.at - b.at);
+  hammer = { t: 0, x, y, cls, bursts, hit: false };
   return true;
 }
 
-/** Where the magnet is and how big, at its time `t`. */
-function magnetPose(m: NonNullable<typeof magnet>): { x: number; y: number; s: number; a: number } {
-  const rest = magRest();
-  if (m.t < MAG_POP) {
-    const k = m.t / MAG_POP;
-    return { x: m.fromX, y: m.fromY, s: easeOutBack(k), a: 1 };
+function updateHammer(dt: number): void {
+  if (!hammer) return;
+  const h = hammer;
+  h.t += dt;
+  if (!h.hit && h.t >= HAM_HIT) {
+    h.hit = true;
+    shake = 1;
+    ring(h.x, h.y, '#ffffff', 46);
+    ring(h.x, h.y, colors[h.cls], 70);
+    emit('star', h.x, h.y, '#fff3a0', 12, 260, 9, 0.55);
+    emit('dust', h.x, h.y, 'rgba(255,250,235,0.9)', 8, 120, 7, 0.5);
+    // the boxes of that colour are done for
+    columns = columns.map((col) => col.filter((t) => t.cls !== h.cls));
+    slots.forEach((t, i) => {
+      if (!t || t.cls !== h.cls) return;
+      t.left = 0;
+      slots[i] = null;
+      pops.push({ x: t.x, y: t.y, t: 0, cls: t.cls });
+      emit('confetti', t.x, t.y, colors[t.cls], 12, 260, 6, 0.7, 160);
+    });
   }
-  if (m.t < MAG_GLIDE) {
-    const k = easeInOut((m.t - MAG_POP) / (MAG_GLIDE - MAG_POP));
-    return { x: m.fromX + (rest.x - m.fromX) * k, y: m.fromY + (rest.y - m.fromY) * k, s: 1, a: 1 };
-  }
-  if (m.t < m.exitAt) {
-    const pulling = m.shards.length > 0;
-    return { x: rest.x + (pulling ? Math.sin(m.t * 45) * 1.6 : 0), y: rest.y, s: 1 + (pulling ? Math.sin(m.t * 22) * 0.03 : 0), a: 1 };
-  }
-  const k = Math.min(1, (m.t - m.exitAt) / MAG_EXIT);
-  const e = k * k;
-  return { x: rest.x + (HOLE_X - rest.x) * e, y: rest.y + (HOLE_Y - rest.y) * e, s: 1 - 0.8 * e, a: 1 - Math.max(0, k - 0.7) / 0.3 };
-}
-
-function updateMagnet(dt: number): void {
-  if (!magnet) return;
-  const m = magnet;
-  m.t += dt;
-  const before = m.shards.length;
-  m.shards = m.shards.filter((sh) => m.t < sh.delay + MAG_FLY);
-  m.arrived += before - m.shards.length;
-  if (m.t > MAG_GLIDE && m.t < m.exitAt) {
-    // sparkles fizzing round the magnet while it pulls
-    const p = magnetPose(m);
-    if (Math.random() < dt * 40) {
-      const c = ['#ff9ad5', '#9fd2ff', '#ffffff', '#ffe27a'][Math.floor(Math.random() * 4)];
-      emit('star', p.x + (Math.random() - 0.5) * 50, p.y + 4 + Math.random() * 16, c, 1, 40, 3 + Math.random() * 3, 0.5);
+  const px = picData!.data;
+  while (h.bursts.length && h.bursts[0].at <= h.t) {
+    const { piece: p } = h.bursts.shift()!;
+    const piece = data!.board.pieces[p];
+    for (const i of piece.pixels) px[i * 4 + 3] = 0;
+    markDirty(piece.pixels);
+    const r = piece.region;
+    regionLeft[r]--;
+    regionSpot[r] = null;
+    regionPulse[r] = 1;
+    // shards fly away from the blow
+    const at = picPoint(p);
+    const dx = at.x - h.x, dy = at.y - h.y, d = Math.hypot(dx, dy) || 1;
+    for (let k = 0; k < 2; k++) {
+      const v = 120 + Math.random() * 160, a = Math.atan2(dy, dx) + (Math.random() - 0.5) * 0.9;
+      particles.push({
+        kind: 'shard', x: at.x, y: at.y, vx: Math.cos(a) * v * (d < 6 ? 0.5 : 1), vy: Math.sin(a) * v - 170,
+        life: 0.75, max: 0.75, color: colors[h.cls], size: 4 + Math.random() * 3, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 16,
+      });
     }
   }
-  if (m.t >= m.exitAt + MAG_EXIT) {
-    holePulse = 1;
-    emit('dust', HOLE_X, HOLE_Y - 4, 'rgba(225,200,165,0.9)', 6, 70, 6, 0.5, 20);
-    magnet = null;
-  }
+  if (h.t >= HAM_END && !h.bursts.length) hammer = null;
 }
 
-/** The wand: appears at the box, winds up, swings down on it, then the box flies off. */
-const WAND_STRIKE = 0.78;
-const WAND_SEND = 0.95;
-const WAND_END = 1.25;
-function updateWand(dt: number): void {
-  if (!wandFx) return;
-  const w = wandFx;
-  w.t += dt;
-  if (!w.struck && w.t >= WAND_STRIKE) {
-    w.struck = true;
-    emit('star', w.tile.x, w.tile.y, '#fff3a0', 9, 190, 8, 0.55);
-    emit('star', w.tile.x, w.tile.y, '#ffffff', 5, 120, 5, 0.4);
-    ring(w.tile.x, w.tile.y, '#fff3a0', 40);
-    w.tile.bounce = 1;
+// glove timeline (seconds): drops in, presses the box, lifts it, lets go and waves off
+const HAND_DOWN = 0.36;
+const HAND_PRESS = 0.5;
+const HAND_LIFT = 0.74;
+const HAND_END = 1.02;
+const HAND_LIFT_H = 44;
+
+function updateHand(dt: number): void {
+  if (!handFx) return;
+  const h = handFx;
+  h.t += dt;
+  if (!h.struck && h.t >= HAND_DOWN) {
+    h.struck = true;
+    h.tile.bounce = 1;
+    emit('star', h.tile.x, h.tile.y - TILE_SIZE / 2, '#fff3a0', 8, 170, 7, 0.5);
+    ring(h.tile.x, h.tile.y, '#fff3a0', 40);
   }
-  if (!w.sent && w.t >= WAND_SEND) {
-    w.sent = true;
+  if (!h.sent && h.t >= HAND_LIFT) {
+    h.sent = true;
     for (let j = 0; j < columns.length; j++) {
-      const k = columns[j].indexOf(w.tile);
-      if (k >= 0) { sendToSlot(j, k); break; }
+      const k = columns[j].indexOf(h.tile);
+      if (k < 0) continue;
+      h.tile.y -= HAND_LIFT_H; // it flies on from where the glove let go
+      sendToSlot(j, k);
+      break;
     }
   }
-  if (w.t >= WAND_END) wandFx = null;
+  if (h.t >= HAND_END) handFx = null;
+}
+
+/** How high the glove has lifted its box (world units). */
+function handLift(t: Tile): number {
+  if (!handFx || handFx.tile !== t || handFx.sent || handFx.t < HAND_PRESS) return 0;
+  return HAND_LIFT_H * easeOut((handFx.t - HAND_PRESS) / (HAND_LIFT - HAND_PRESS));
 }
 
 function spendDev(key: BoosterKey): void {
-  if (OWN_UI) devCounts[key] = devCounts[key] > 1 ? devCounts[key] - 1 : 3;
+  if (OWN_UI) devCounts[key] = Math.max(0, devCounts[key] - 1);
 }
 
 const barX = (i: number) => DW / 2 + (i - 1) * 104;
+/** Booster button art: width in design units, and where its "+" badge sits (fractions of the art). */
+const ICON_W = 84;
+const ICON_BADGE = { x: 0.82, y: 0.82, r: 0.15 };
 const barY = () => view.dh - BAR_H / 2 - 4;
+
+/** A button dips, then springs back past its size and settles. */
+const press = (id: string) => presses.set(id, 0);
+function pressScale(id: string): number {
+  const t = presses.get(id);
+  return t === undefined ? 1 : 1 - 0.14 * Math.exp(-t * 7) * Math.cos(t * 19);
+}
+
+/** Ripples where the screen was touched. */
+function drawTaps(dpr: number): void {
+  if (!taps.length) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (const p of taps) {
+    const k = p.t / 0.4;
+    ctx.globalAlpha = (1 - k) * 0.9;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3.5 * (1 - k) + 1;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 8 + 30 * easeOut(k), 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = '#fff6c8';
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + 0.3, d = 10 + 34 * easeOut(k);
+      ctx.beginPath(); ctx.arc(p.x + Math.cos(a) * d, p.y + Math.sin(a) * d, 2.6 * (1 - k), 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
 
 /** Development stand-in for the studio's booster bar: true when the tap was on it. */
 function devBoosterTap(ux: number, uy: number): boolean {
@@ -867,6 +960,13 @@ function devBoosterTap(ux: number, uy: number): boolean {
   for (let i = 0; i < BOOSTERS.length; i++) {
     if (Math.hypot(ux - barX(i), uy - barY()) > 38) continue;
     const key = BOOSTERS[i].key;
+    press('b:' + key);
+    if (devCounts[key] === 0 && armed !== key) {
+      // out of stock: no wallet here, so the "+" just restocks
+      devCounts[key] = 3;
+      ring(barX(i), barY(), '#ffffff', 40);
+      return true;
+    }
     if (armed === key) armed = null;
     else if (activateBooster(key) && key === 'addslot') spendDev('addslot');
     return true;
@@ -886,8 +986,72 @@ function roundRect(c: CanvasRenderingContext2D, x: number, y: number, w: number,
   c.roundRect(x, y, w, h, r);
 }
 
-/** A chunky 3D box: cream rim, deep side, glossy bevelled top, embossed number. */
+const labelWidths = new Map<string, number>();
+const labelSprites = new Map<string, HTMLCanvasElement>();
+/** Width of a count at 15px. */
+function labelWidth(label: string): number {
+  let w = labelWidths.get(label);
+  if (w === undefined) {
+    ctx.font = `800 15px ${FONT}`;
+    labelWidths.set(label, (w = ctx.measureText(label).width));
+  }
+  return w;
+}
+/** A pane's count at font size `fs`: white with a dark outline and drop. */
+function labelSprite(label: string, fs: number): HTMLCanvasElement {
+  const key = `${label}|${fs}`;
+  let sprite = labelSprites.get(key);
+  if (sprite) return sprite;
+  if (labelSprites.size > 600) labelSprites.clear();
+  const lw = Math.max(2, fs * 0.27);
+  const w = (labelWidth(label) * fs) / 15 + lw * 2 + 2, h = fs + lw * 2 + 3;
+  sprite = document.createElement('canvas');
+  sprite.width = Math.ceil(w * SPRITE_RES);
+  sprite.height = Math.ceil(h * SPRITE_RES);
+  const g = sprite.getContext('2d')!;
+  g.scale(SPRITE_RES, SPRITE_RES);
+  g.font = `800 ${fs}px ${FONT}`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.lineJoin = 'round';
+  g.lineWidth = lw;
+  const cx = w / 2, cy = h / 2 - 0.75;
+  g.strokeStyle = 'rgba(20,12,6,0.85)';
+  g.fillStyle = 'rgba(20,12,6,0.85)';
+  g.strokeText(label, cx, cy + 1.5);
+  g.fillText(label, cx, cy + 1.5);
+  g.strokeText(label, cx, cy);
+  g.fillStyle = '#ffffff';
+  g.fillText(label, cx, cy);
+  labelSprites.set(key, sprite);
+  return sprite;
+}
+
+/** Pixels per world unit in cached sprites. */
+const SPRITE_RES = 2;
+const tileSprites = new Map<string, HTMLCanvasElement>();
+
+/** A box, from its cached sprite (painted on first use). */
 function drawTile(x: number, y: number, size: number, color: string, label: string, dim: boolean): void {
+  size = Math.round(size);
+  const key = `${color}|${size}|${label}|${dim ? 1 : 0}`;
+  let sprite = tileSprites.get(key);
+  const h = size / 2, top = h + 3, bottom = h + size * 0.17 + 6, side = h + 4;
+  if (!sprite) {
+    if (tileSprites.size > 600) tileSprites.clear();
+    sprite = document.createElement('canvas');
+    sprite.width = Math.ceil(side * 2 * SPRITE_RES);
+    sprite.height = Math.ceil((top + bottom) * SPRITE_RES);
+    const g = sprite.getContext('2d')!;
+    g.scale(SPRITE_RES, SPRITE_RES);
+    paintTile(g, side, top, size, color, label, dim);
+    tileSprites.set(key, sprite);
+  }
+  ctx.drawImage(sprite, x - side, y - top, sprite.width / SPRITE_RES, sprite.height / SPRITE_RES);
+}
+
+/** A chunky 3D box: cream rim, deep side, glossy bevelled top, embossed number. */
+function paintTile(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color: string, label: string, dim: boolean): void {
   const base = dim ? shade(color, 0.42) : color;
   const r = size * 0.24, depth = size * 0.17, h = size / 2;
   ctx.fillStyle = 'rgba(95,50,10,0.25)';
@@ -1163,7 +1327,8 @@ function drawParticle(p: Particle): void {
 }
 
 function draw(): void {
-  const dpr = window.devicePixelRatio || 1;
+  // 2x is as sharp as the eye tells apart on a phone; 3x would fill 2.25 times the pixels
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
   const W = canvas.clientWidth, H = canvas.clientHeight;
   if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
     canvas.width = Math.round(W * dpr);
@@ -1175,7 +1340,7 @@ function draw(): void {
   // the wand zooms the scene out so every row of boxes fits above the bar
   const rows = Math.max(1, ...columns.map((c) => c.length));
   const fit = Math.max(0.45, Math.min(1, (H / scale - BAR_H) / (COL_Y0 + (rows - 1) * COL_PITCH + TILE_SIZE / 2 + 12)));
-  // the magnet zooms in on the picture and centres it
+  // the hammer zooms in on the picture and centres it
   const camW = easeInOut(wandT), camM = easeInOut(magT);
   const zin = Math.min(1.17, (DW - 12) / PW);
   const cam = 1 + (fit - 1) * camW + (zin - 1) * camM;
@@ -1199,11 +1364,12 @@ function draw(): void {
   ctx.fillStyle = '#ffffff';
   ctx.fillText(`Lv. ${level + 1}`, DW / 2, 56);
 
-  ctx.setTransform(dpr * ws, 0, 0, dpr * ws, dpr * view.wox, dpr * view.woy);
-  if (!data) { drawWave(W, H, dpr, scale); return; }
+  // the hammer's blow shakes the world (not the UI)
+  const shx = shake ? Math.sin(clock * 83) * 7 * shake : 0, shy = shake ? Math.cos(clock * 71) * 6 * shake : 0;
+  ctx.setTransform(dpr * ws, 0, 0, dpr * ws, dpr * (view.wox + shx), dpr * (view.woy + shy));
+  if (!data) { drawWave(W, H, dpr, scale); drawTaps(dpr); return; }
 
   // the picture lies straight on the beach: eaten spots show the background sand itself
-  ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(picCanvas, PIC_X, PIC_Y, PW, PH);
   // prints go on top: on the picture they only ever sit where the glass is already gone
   drawPrints();
@@ -1219,20 +1385,13 @@ function draw(): void {
     if (!at) return;
     // as big as fits in the room round the spot, never past the pane's edge
     const label = String(regionLeft[r]);
-    ctx.font = `800 15px ${FONT}`;
-    const half = Math.hypot(ctx.measureText(label).width / 2 + 2, 15 * 0.36 + 2);
-    const fit = Math.min(1, (at.r - 1) / half) * 15;
+    const half = Math.hypot(labelWidth(label) / 2 + 2, 15 * 0.36 + 2);
+    const fit = Math.round(Math.min(1, (at.r - 1) / half) * 15 * 2) / 2;
     if (fit < 6) return;
-    const s = fit * (1 + regionPulse[r] * 0.25);
-    ctx.font = `800 ${s.toFixed(1)}px ${FONT}`;
-    ctx.lineWidth = Math.max(2, s * 0.27);
-    ctx.strokeStyle = 'rgba(20,12,6,0.85)';
-    ctx.strokeText(String(regionLeft[r]), at.x, at.y + 1.5);
-    ctx.fillStyle = 'rgba(20,12,6,0.85)';
-    ctx.fillText(String(regionLeft[r]), at.x, at.y + 1.5);
-    ctx.strokeText(String(regionLeft[r]), at.x, at.y);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(String(regionLeft[r]), at.x, at.y);
+    const sprite = labelSprite(label, fit);
+    const k = (1 + regionPulse[r] * 0.25) / SPRITE_RES;
+    const w = sprite.width * k, h = sprite.height * k;
+    ctx.drawImage(sprite, at.x - w / 2, at.y - h / 2 + 0.75 * k * SPRITE_RES, w, h);
   });
 
   // the hole: sunken, with a lit lower lip
@@ -1260,6 +1419,7 @@ function draw(): void {
     // a slot added by the booster pops in
     const pop = slotPops.find((p) => p.i === i);
     if (!pop) { drawSlot(slotX(i), SLOT_Y); return; }
+    if (pop.t < 0) return; // its card is still on the way
     const k = Math.min(1, pop.t / 0.35);
     ctx.save();
     ctx.translate(slotX(i), SLOT_Y);
@@ -1289,24 +1449,26 @@ function draw(): void {
   // columns, back rows first
   const bottom = (H - BAR_H * scale - view.woy) / ws;
   const maxRows = Math.max(1, Math.floor((bottom - COL_Y0 - TILE_SIZE / 2 - 8) / COL_PITCH) + 1);
-  const wandOut = armed === 'magichand' || wandFx !== null;
+  const wandOut = armed === 'magichand' || handFx !== null;
   ctx.globalAlpha = 1 - camM;
   columns.forEach((col) => {
     for (let k = Math.min(col.length, maxRows) - 1; k >= 0; k--) {
       const t = col[k];
       const sx = t.shake > 0 ? Math.sin(t.shake * 60) * 5 : 0;
-      const picked = wandFx?.tile === t;
+      const picked = handFx?.tile === t;
+      const lift = handLift(t);
       if (picked) {
-        // the picked box glows, brightest as the wand strikes
+        // the picked box glows, brightest as the glove presses it
         const g = 0.45 + Math.sin(clock * 10) * 0.2 + t.bounce * 0.4;
         ctx.fillStyle = `rgba(255,248,200,${Math.min(1, g)})`;
-        roundRect(ctx, t.x - TILE_SIZE / 2 - 5, t.y - TILE_SIZE / 2 - 5, TILE_SIZE + 10, TILE_SIZE + 18, 16);
+        roundRect(ctx, t.x - TILE_SIZE / 2 - 5, t.y - lift - TILE_SIZE / 2 - 5, TILE_SIZE + 10, TILE_SIZE + 18, 16);
         ctx.fill();
       }
-      const b = picked ? Math.sin(t.bounce * Math.PI) * 0.12 : 0;
+      // pressed: squash down; lifted: stretch a little
+      const b = picked ? Math.sin(t.bounce * Math.PI) * 0.14 : 0;
       ctx.save();
-      ctx.translate(t.x + sx, t.y);
-      ctx.scale(1 + b, 1 + b);
+      ctx.translate(t.x + sx, t.y - lift);
+      ctx.scale(1 + b, 1 - b + (lift ? 0.04 : 0));
       drawTile(0, 0, TILE_SIZE, colors[t.cls], String(t.left), k > 0 && !wandOut);
       ctx.restore();
     }
@@ -1322,15 +1484,17 @@ function draw(): void {
 
   for (const c of crabs) if (c.state !== 'drop') drawCrab(c);
   for (const c of crabs) if (c.state === 'drop') drawCrab(c);
-  drawMagnetFx();
-  drawWandFx();
+  drawHammerFx();
+  drawHandFx();
+  drawAddFx();
   for (const p of particles) drawParticle(p);
 
   // the bar and its tooltip stay put while the board zooms
   ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * view.ox, 0);
   if (OWN_UI) drawDevBoosters();
-  if (OWN_UI && outcome) drawDevOverlay();
+  if (OWN_UI && outcome) drawPopup(W, H, dpr);
   drawWave(W, H, dpr, scale);
+  drawTaps(dpr);
 }
 
 // ---- sand, prints and the wave ----
@@ -1357,33 +1521,44 @@ function sandRelief(W: number, H: number): HTMLCanvasElement {
   return c;
 }
 
-/** Little dimples pressed into the sand, fading as they age. */
+/** Presses one step's pair of dimples into the print layer. */
+function stampPrint(px: number, py: number, ang: number, foot: number): void {
+  const side = foot ? 1 : -1;
+  const cos = Math.cos(ang), sin = Math.sin(ang);
+  for (const k of [-1, 1]) {
+    // one dimple each side of the crab, the sides stepping alternately
+    const along = side * 1.6 * k, across = 5 * k;
+    const x = px + cos * along - sin * across, y = py + sin * along + cos * across;
+    printCtx.fillStyle = 'rgba(135,78,25,0.45)';
+    printCtx.beginPath(); printCtx.arc(x, y, 1.6, 0, Math.PI * 2); printCtx.fill();
+    printCtx.fillStyle = 'rgba(255,240,205,0.6)';
+    printCtx.beginPath(); printCtx.arc(x + 0.8, y + 0.9, 1, 0, Math.PI * 2); printCtx.fill();
+  }
+}
+
+/** Fades the whole layer so a print is gone after about PRINT_LIFE seconds. */
+function fadePrints(dt: number): void {
+  printFadeT += dt;
+  if (printFadeT < PRINT_FADE) return;
+  const steps = Math.round(PRINT_LIFE / PRINT_FADE);
+  printFadeT = 0;
+  printCtx.save();
+  printCtx.setTransform(1, 0, 0, 1, 0, 0);
+  printCtx.globalCompositeOperation = 'destination-out';
+  printCtx.fillStyle = `rgba(0,0,0,${(3 / steps).toFixed(3)})`;
+  printCtx.fillRect(0, 0, printLayer.width, printLayer.height);
+  printCtx.restore();
+}
+
+function clearPrints(): void {
+  printCtx.save();
+  printCtx.setTransform(1, 0, 0, 1, 0, 0);
+  printCtx.clearRect(0, 0, printLayer.width, printLayer.height);
+  printCtx.restore();
+}
+
 function drawPrints(): void {
-  // many prints, few draw calls: prints are grouped by how faded they are, one path per group
-  const GROUPS = 6;
-  const dark: Path2D[] = [], lit: Path2D[] = [];
-  for (let g = 0; g < GROUPS; g++) { dark.push(new Path2D()); lit.push(new Path2D()); }
-  for (const p of prints) {
-    const g = Math.min(GROUPS - 1, Math.floor((p.life / PRINT_LIFE) * GROUPS));
-    const side = p.foot ? 1 : -1;
-    const cos = Math.cos(p.ang), sin = Math.sin(p.ang);
-    for (const k of [-1, 1]) {
-      // one dimple each side of the crab, the sides stepping alternately
-      const along = side * 1.6 * k, across = 5 * k;
-      const x = p.x + cos * along - sin * across, y = p.y + sin * along + cos * across;
-      dark[g].moveTo(x + 1.6, y);
-      dark[g].arc(x, y, 1.6, 0, Math.PI * 2);
-      lit[g].moveTo(x + 1.8, y + 0.9);
-      lit[g].arc(x + 0.8, y + 0.9, 1, 0, Math.PI * 2);
-    }
-  }
-  for (let g = 0; g < GROUPS; g++) {
-    const a = Math.min(1, ((g + 0.5) / GROUPS) * 1.3);
-    ctx.fillStyle = `rgba(135,78,25,${0.42 * a})`;
-    ctx.fill(dark[g]);
-    ctx.fillStyle = `rgba(255,240,205,${0.55 * a})`;
-    ctx.fill(lit[g]);
-  }
+  ctx.drawImage(printLayer, PRINT_BOX.x, PRINT_BOX.y, PRINT_BOX.w, PRINT_BOX.h);
 }
 
 const easeOut = (t: number) => 1 - (1 - t) ** 3;
@@ -1404,14 +1579,30 @@ function waveTop(H: number): number {
 }
 
 /** The beach itself: background art plus its light, optionally nudged (for the wobble seen through water). */
+let beach: { canvas: HTMLCanvasElement; key: string } | null = null;
 function drawSand(W: number, H: number, dx: number, dy: number): void {
-  ctx.fillStyle = '#f7c46c';
-  ctx.fillRect(0, 0, W, H);
-  if (bgImg && bgImg.width) {
-    const s = Math.max(W / bgImg.width, H / bgImg.height);
-    ctx.drawImage(bgImg, (W - bgImg.width * s) / 2 + dx, dy, bgImg.width * s, bgImg.height * s);
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const key = `${W}x${H}@${dpr}:${bgImg?.width ?? 0}`;
+  if (beach?.key !== key) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(W * dpr));
+    c.height = Math.max(1, Math.round(H * dpr));
+    const g = c.getContext('2d')!;
+    g.scale(dpr, dpr);
+    g.fillStyle = '#f7c46c';
+    g.fillRect(0, 0, W, H);
+    if (bgImg && bgImg.width) {
+      const s = Math.max(W / bgImg.width, H / bgImg.height);
+      g.drawImage(bgImg, (W - bgImg.width * s) / 2, 0, bgImg.width * s, bgImg.height * s);
+    }
+    g.drawImage(sandRelief(W, H), 0, 0, W, H);
+    beach = { canvas: c, key };
   }
-  ctx.drawImage(sandRelief(W, H), 0, 0, W, H);
+  if (dx || dy) {
+    ctx.fillStyle = '#f7c46c';
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.drawImage(beach.canvas, dx, dy, W, H);
 }
 
 /**
@@ -1529,178 +1720,104 @@ function drawWave(W: number, H: number, dpr: number, u: number): void {
   }
 }
 
-function drawMagnetFx(): void {
-  if (!magnet) return;
-  const m = magnet;
-  const puff = magPuff();
-  // shards: jiggle where the piece was, then shoot into the puff
-  for (const sh of m.shards) {
-    const k = Math.max(0, (m.t - sh.delay) / MAG_FLY);
-    const e = k * k;
-    const jig = k === 0 ? Math.sin(m.t * 38 + sh.rot * 5) * 1.2 : 0;
-    const x = sh.x + (puff.x - sh.x) * e + jig, y = sh.y + (puff.y - sh.y) * e;
-    const z = sh.size * (1 - 0.6 * e) * Math.min(1, m.t / 0.12);
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(sh.rot + m.t * (k > 0 ? 9 : 1));
-    ctx.fillStyle = sh.color;
-    ctx.fillRect(-z / 2, -z / 2, z, z);
-    ctx.fillStyle = 'rgba(255,255,255,0.45)';
-    ctx.fillRect(-z / 2, -z / 2, z, z * 0.35);
-    ctx.restore();
-  }
-  // the white puff swallowing them, growing as they arrive
-  if (m.t > MAG_GLIDE - 0.1) {
-    const total = m.arrived + m.shards.length;
-    const grow = Math.min(1, (m.t - (MAG_GLIDE - 0.1)) / 0.2) * (0.5 + 0.5 * Math.min(1, m.arrived / Math.max(6, total * 0.25)));
-    const fade = m.t > m.exitAt ? Math.max(0, 1 - (m.t - m.exitAt) / 0.2) : 1;
-    const r = 32 * grow * fade;
-    if (r > 0.5) {
-      ctx.fillStyle = 'rgba(160,200,255,0.35)';
-      ctx.beginPath(); ctx.arc(puff.x, puff.y + 3, r * 1.25, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2 + m.t * 3;
-        const rr = r * (0.45 + 0.15 * Math.sin(m.t * 17 + i * 2.3));
-        ctx.beginPath();
-        ctx.arc(puff.x + Math.cos(a) * r * 0.55, puff.y + Math.sin(a) * r * 0.45, rr, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.beginPath(); ctx.arc(puff.x, puff.y, r * 0.6, 0, Math.PI * 2); ctx.fill();
-    }
-  }
-  const p = magnetPose(m);
-  ctx.globalAlpha = Math.max(0, p.a);
-  ctx.fillStyle = 'rgba(40,20,0,0.28)';
-  ctx.beginPath(); ctx.ellipse(p.x + 3, p.y + 30 * p.s, 27 * p.s, 8 * p.s, 0, 0, Math.PI * 2); ctx.fill();
-  drawMagnetIcon(p.x, p.y, 2.6 * p.s, Math.PI + Math.sin(m.t * 30) * (m.t < MAG_POP ? 0.15 : 0));
-  ctx.globalAlpha = 1;
-}
-
-/** Horseshoe magnet, gold with blue tips and a red star; rot 0 = open side down. */
-function drawMagnetIcon(x: number, y: number, s: number, rot: number): void {
+/** Draws `img` centred on (x, y), `w` wide, turned by `rot`, squashed by sx / sy. */
+function sprite(img: HTMLImageElement | null, x: number, y: number, w: number, rot = 0, sx = 1, sy = 1): void {
+  if (!img) return;
+  const h = (img.height / img.width) * w;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(rot);
-  ctx.scale(s, s);
-  ctx.lineCap = 'butt';
-  const arm = () => { ctx.beginPath(); ctx.moveTo(-8, 7); ctx.lineTo(-8, 0); ctx.arc(0, 0, 8, Math.PI, 0); ctx.lineTo(8, 7); };
-  arm(); ctx.strokeStyle = '#8a4500'; ctx.lineWidth = 9; ctx.stroke();
-  arm(); ctx.strokeStyle = '#ffa514'; ctx.lineWidth = 6.6; ctx.stroke();
-  ctx.save();
-  ctx.translate(-0.8, -0.8);
-  arm(); ctx.strokeStyle = 'rgba(255,236,170,0.85)'; ctx.lineWidth = 1.6; ctx.stroke();
-  ctx.restore();
-  for (const sx of [-8, 8]) {
-    const g = ctx.createLinearGradient(sx - 4, 0, sx + 4, 0);
-    g.addColorStop(0, '#2b55c8'); g.addColorStop(0.45, '#8fc0ff'); g.addColorStop(1, '#2048b0');
-    ctx.fillStyle = g;
-    ctx.fillRect(sx - 4.4, 7, 8.8, 5.5);
-    ctx.strokeStyle = '#132a6e'; ctx.lineWidth = 0.9;
-    ctx.strokeRect(sx - 4.4, 7, 8.8, 5.5);
-  }
-  // the star on the bend
-  ctx.fillStyle = '#e8352b';
-  ctx.strokeStyle = '#7a120c';
-  ctx.lineWidth = 0.6;
-  ctx.beginPath();
-  for (let i = 0; i < 10; i++) {
-    const a = Math.PI / 2 + (i / 10) * Math.PI * 2, r = i % 2 ? 1.3 : 3;
-    ctx.lineTo(Math.cos(a) * r, -8 + Math.sin(a) * r);
-  }
-  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.scale(sx, sy);
+  ctx.drawImage(img, -w / 2, -h / 2, w, h);
   ctx.restore();
 }
 
-/** Striped wand with a gold star; pivots at the handle's end, rot 0 = upright. */
-function drawWand(x: number, y: number, rot: number, s: number): void {
-  const L = 42;
-  for (const shadow of [true, false]) {
-    ctx.save();
-    ctx.translate(x + (shadow ? -7 : 0), y + (shadow ? 7 : 0));
-    ctx.rotate(rot);
-    ctx.scale(s, s);
-    if (shadow) ctx.globalAlpha *= 0.3;
-    const stripes = shadow ? ['#000', '#000', '#000'] : ['#e8352b', '#ffd23f', '#2f6fe4'];
-    for (let i = 0; i < 6; i++) {
-      ctx.fillStyle = stripes[i % 3];
-      ctx.fillRect(-3, -i * 6.5 - 6.5, 6, 6.6);
-    }
-    if (!shadow) {
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.fillRect(-3, -39, 2, 39);
-    }
-    ctx.translate(0, -L);
-    ctx.rotate(-rot * 0.3);
-    ctx.fillStyle = shadow ? '#000' : '#ffcc1a';
-    ctx.strokeStyle = shadow ? 'rgba(0,0,0,0)' : '#b36b00';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (let i = 0; i < 10; i++) {
-      const a = -Math.PI / 2 + (i / 10) * Math.PI * 2, r = i % 2 ? 6 : 13;
-      ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
-    }
-    ctx.closePath(); ctx.fill(); ctx.stroke();
-    if (!shadow) {
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      ctx.beginPath(); ctx.ellipse(-3, -4, 3.5, 2, -0.6, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.restore();
-  }
+// in the hammer art the head points up-left of its handle's end
+const HAM_W = 124;
+const HAM_PIVOT = { x: 0.32, y: 0.4 }; // handle end, from the art's centre (fractions of its size)
+const HAM_HEAD_ANGLE = Math.atan2(-0.42, -0.36); // from the handle end to the head
+const HAM_REACH = 0.6; // handle end to head, × width
+
+/** The hammer's angle (head direction from the handle end) and size at time `t`. */
+function hammerPose(t: number): { a: number; s: number; alpha: number } {
+  const RAISED = -1.05, BACK = -0.6, HIT = Math.PI * 0.82;
+  if (t < HAM_POP) return { a: RAISED, s: easeOutBack(t / HAM_POP), alpha: 1 };
+  if (t < HAM_WIND) return { a: RAISED + (BACK - RAISED) * easeInOut((t - HAM_POP) / (HAM_WIND - HAM_POP)), s: 1, alpha: 1 };
+  // the swing runs the long way round: up, over, down onto the glass
+  if (t < HAM_HIT) { const k = (t - HAM_WIND) / (HAM_HIT - HAM_WIND); return { a: BACK - (BACK + Math.PI * 2 - HIT) * k * k, s: 1, alpha: 1 }; }
+  const after = t - HAM_HIT;
+  const recoil = Math.sin(Math.min(1, after / 0.25) * Math.PI) * 0.35;
+  const fade = Math.max(0, (t - (HAM_END - 0.3)) / 0.3);
+  return { a: HIT - Math.PI * 2 + recoil + fade * 0.6, s: 1 + fade * 0.2, alpha: 1 - fade };
 }
 
-function drawWandFx(): void {
-  if (!wandFx) return;
-  const w = wandFx, t = w.t, box = w.tile;
-  // the handle sits below and right of the box; at -45° the star lands on it
-  const px = box.x + 30, py = box.y + 30;
-  const STRIKE = -Math.PI / 4;
-  let rot: number, sc = 1, alpha = 1;
-  if (t < 0.25) { const k = t / 0.25; rot = STRIKE * (1 - easeInOut(k)); sc = easeOutBack(k); }
-  else if (t < 0.6) rot = 0.5 * easeInOut((t - 0.25) / 0.35);
-  else if (t < WAND_STRIKE) { const k = (t - 0.6) / (WAND_STRIKE - 0.6); rot = 0.5 + (STRIKE - 0.5) * k * k; }
-  else if (t < WAND_SEND) rot = STRIKE + 0.2 * Math.sin(((t - WAND_STRIKE) / (WAND_SEND - WAND_STRIKE)) * Math.PI);
-  else { const k = (t - WAND_SEND) / (WAND_END - WAND_SEND); rot = STRIKE + 0.3 * k; sc = 1 - 0.5 * k; alpha = 1 - k; }
-  ctx.globalAlpha = Math.max(0, alpha);
-  drawWand(px, py, rot, sc);
+function drawHammerFx(): void {
+  if (!hammer || !ui.hammer) return;
+  const h = hammer;
+  // the handle end sits up and right of the spot, so the head lands on it
+  const reach = HAM_W * HAM_REACH;
+  const hitA = Math.PI * 0.82;
+  const ex = h.x - Math.cos(hitA) * reach, ey = h.y - Math.sin(hitA) * reach;
+  const draw = (t: number, alpha: number) => {
+    const p = hammerPose(t);
+    const rot = p.a - HAM_HEAD_ANGLE;
+    // place the art so its handle end is at (ex, ey)
+    const w = HAM_W * p.s, hh = (ui.hammer!.height / ui.hammer!.width) * w;
+    const ox = HAM_PIVOT.x * w, oy = HAM_PIVOT.y * hh;
+    const cx = ex - (Math.cos(rot) * ox - Math.sin(rot) * oy), cy = ey - (Math.sin(rot) * ox + Math.cos(rot) * oy);
+    ctx.globalAlpha = alpha * p.alpha;
+    sprite(ui.hammer, cx, cy, w, rot);
+  };
+  // the head's shadow on the glass grows as it comes down
+  if (h.t < HAM_HIT) {
+    const k = Math.max(0, (h.t - HAM_WIND) / (HAM_HIT - HAM_WIND));
+    ctx.fillStyle = `rgba(30,15,5,${0.12 + 0.25 * k})`;
+    ctx.beginPath(); ctx.ellipse(h.x, h.y + 4, 22 * (0.5 + k * 0.5), 9 * (0.5 + k * 0.5), 0, 0, Math.PI * 2); ctx.fill();
+  }
+  // motion trail on the downswing
+  if (h.t > HAM_WIND && h.t < HAM_HIT + 0.05) {
+    for (const [lag, a] of [[0.05, 0.25], [0.025, 0.4]] as const) draw(Math.max(HAM_WIND, h.t - lag), a);
+  }
+  draw(h.t, 1);
   ctx.globalAlpha = 1;
 }
 
-function drawBoosterIcon(key: BoosterKey, x: number, y: number): void {
-  if (key === 'vacuum') { drawMagnetIcon(x, y - 1, 1.35, Math.PI - 0.35); return; }
-  ctx.save();
-  ctx.translate(x, y);
-  if (key === 'addslot') {
-    ctx.rotate(-0.18);
-    ctx.fillStyle = '#b8860b';
-    roundRect(ctx, -12, -10, 24, 24, 6); ctx.fill();
-    ctx.fillStyle = '#ffd23f';
-    roundRect(ctx, -12, -12, 24, 24, 6); ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    roundRect(ctx, -8, -8, 16, 16, 4); ctx.fill();
-    ctx.fillStyle = '#2f6fe4';
-    ctx.fillRect(-2, -6, 4, 12);
-    ctx.fillRect(-6, -2, 12, 4);
-  } else {
-    // magic wand: striped stick, golden star
-    ctx.rotate(0.65);
-    ctx.fillStyle = '#7a2a12';
-    roundRect(ctx, -2.6, -4, 5.2, 22, 2.5); ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    for (const yy of [2, 9]) ctx.fillRect(-2.6, yy, 5.2, 3);
-    ctx.rotate(-0.65);
-    ctx.translate(-4, -6);
-    ctx.fillStyle = '#ffcc1a';
-    ctx.strokeStyle = '#a86a00';
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    for (let i = 0; i < 10; i++) {
-      const a = -Math.PI / 2 + (i / 10) * Math.PI * 2, r = i % 2 ? 4.6 : 10;
-      ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
-    }
-    ctx.closePath(); ctx.fill(); ctx.stroke();
+/** The glove drops onto the picked box fingers first, presses, lifts it, then waves off. */
+function drawHandFx(): void {
+  if (!handFx || !ui.hand) return;
+  const { t, tile } = handFx;
+  const W = 78;
+  // the art's fingers point up-left: turned so they point down at the box
+  const ROT = Math.PI * 1.18;
+  const tipY = tile.y - TILE_SIZE / 2 + 8; // where the fingertips touch
+  const rest = tipY - W * 0.42; // glove centre when touching
+  let y = rest - 70, sx = 1, sy = 1, alpha = 1, rot = ROT, x = tile.x + 6;
+  if (t < 0.2) { const k = t / 0.2; y = rest - 110 + 40 * k; sx = sy = easeOutBack(k); alpha = Math.min(1, k * 2); }
+  else if (t < HAND_DOWN) { const k = (t - 0.2) / (HAND_DOWN - 0.2); y = rest - 70 + 70 * k * k; }
+  else if (t < HAND_PRESS) { const k = (t - HAND_DOWN) / (HAND_PRESS - HAND_DOWN); y = rest + 4 * Math.sin(k * Math.PI); sx = 1 + 0.1 * Math.sin(k * Math.PI); sy = 1 - 0.12 * Math.sin(k * Math.PI); }
+  else if (t < HAND_LIFT) { y = rest - handLift(tile); rot = ROT + 0.06 * Math.sin((t - HAND_PRESS) * 20); }
+  else { const k = (t - HAND_LIFT) / (HAND_END - HAND_LIFT); y = rest - HAND_LIFT_H - 120 * k * k; x += 40 * k; rot = ROT - 0.5 * k; alpha = 1 - k; }
+  // its shadow on the box gets darker as it comes close
+  if (t < HAND_PRESS) {
+    const near = Math.max(0, 1 - (tipY - (y + W * 0.42)) / 80);
+    ctx.fillStyle = `rgba(40,20,5,${0.25 * near})`;
+    ctx.beginPath(); ctx.ellipse(tile.x, tipY + 4, 20, 7, 0, 0, Math.PI * 2); ctx.fill();
   }
-  ctx.restore();
+  ctx.globalAlpha = alpha;
+  sprite(ui.hand, x, y, W, rot, sx, sy);
+  ctx.globalAlpha = 1;
+}
+
+/** The Add Slot card on its way from the button to the new slot. */
+function drawAddFx(): void {
+  for (const p of slotPops) {
+    if (p.t >= 0) continue;
+    const k = 1 + p.t / ADD_FLY;
+    const e = easeInOut(k);
+    const x = p.fromX + (slotX(p.i) - p.fromX) * e, y = p.fromY + (SLOT_Y - p.fromY) * e - Math.sin(k * Math.PI) * 90;
+    const w = 54 * (0.7 + Math.sin(k * Math.PI) * 0.5);
+    sprite(ui.cards, x, y, w, (1 - k) * Math.PI * 1.5);
+  }
 }
 
 /** Development stand-in for the studio's booster bar and its tooltip. */
@@ -1712,26 +1829,33 @@ function drawDevBoosters(): void {
       ctx.fillStyle = `rgba(255,230,90,${0.45 + Math.sin(clock * 8) * 0.25})`;
       ctx.beginPath(); ctx.arc(x, y, 42, 0, Math.PI * 2); ctx.fill();
     }
-    ctx.fillStyle = 'rgba(100,55,10,0.3)';
-    ctx.beginPath(); ctx.arc(x, y + 5, 35, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#fff3dc';
-    ctx.beginPath(); ctx.arc(x, y, 35, 0, Math.PI * 2); ctx.fill();
-    const g = ctx.createLinearGradient(0, y - 27, 0, y + 27);
-    g.addColorStop(0, '#5fb4ff'); g.addColorStop(1, '#1d58d0');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, 27, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.3)';
-    ctx.beginPath(); ctx.ellipse(x - 6, y - 14, 14, 6, -0.2, 0, Math.PI * 2); ctx.fill();
-    drawBoosterIcon(b.key, x, y);
-    ctx.fillStyle = '#e8352b';
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2.5;
-    ctx.beginPath(); ctx.arc(x + 25, y + 22, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#ffffff';
-    ctx.font = `800 14px ${FONT}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(devCounts[b.key]), x + 25, y + 23);
+    const img = ui[b.key];
+    if (!img) return;
+    // the art comes with a green "+" badge: shown as is when out of stock,
+    // otherwise covered by the count
+    const k = pressScale('b:' + b.key) * (armed === b.key ? 1 + 0.06 * Math.sin(clock * 7) : 1);
+    const w = ICON_W, h = (img.height / img.width) * w;
+    ctx.fillStyle = 'rgba(100,55,10,0.28)';
+    ctx.beginPath(); ctx.ellipse(x + 2, y + h * 0.42, w * 0.4 * k, h * 0.1, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(k, k);
+    ctx.translate(-x, -y);
+    ctx.drawImage(img, x - w / 2, y - h / 2, w, h);
+    const n = devCounts[b.key];
+    if (n > 0) {
+      const bx = x - w / 2 + ICON_BADGE.x * w, by = y - h / 2 + ICON_BADGE.y * h, r = ICON_BADGE.r * w;
+      ctx.fillStyle = '#fff6e6';
+      ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#e8352b';
+      ctx.beginPath(); ctx.arc(bx, by, r - 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `800 ${Math.round(r * 1.25)}px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(n), bx, by + 1);
+    }
+    ctx.restore();
   });
   if (!armed) return;
   const b = BOOSTERS.find((d) => d.key === armed)!;
@@ -1760,19 +1884,138 @@ function drawDevBoosters(): void {
   ctx.restore();
 }
 
-function drawDevOverlay(): void {
-  ctx.fillStyle = 'rgba(30,20,10,0.55)';
-  ctx.fillRect(-1000, 0, DW + 2000, view.dh);
-  ctx.fillStyle = '#fff3df';
-  roundRect(ctx, DW / 2 - 180, view.dh / 2 - 90, 360, 180, 28);
-  ctx.fill();
-  ctx.textAlign = 'center';
-  ctx.fillStyle = outcome === 'win' ? '#2c9a3c' : '#d2402f';
-  ctx.font = `800 38px ${FONT}`;
-  ctx.fillText(outcome === 'win' ? 'Picture cleared!' : 'Out of slots!', DW / 2, view.dh / 2 - 25);
-  ctx.fillStyle = '#6b4a2a';
-  ctx.font = `700 20px ${FONT}`;
-  ctx.fillText(outcome === 'win' ? 'Tap for the next level' : 'Tap to retry', DW / 2, view.dh / 2 + 35);
+// ---- the game's own popups (dev and standalone builds) ----
+// Layouts are in the art's own pixel space (the files are drawn at these sizes):
+// the win art is 1024×1536, the slots-full panel 975×1025.
+const WIN = { w: 1024, h: 1536, box: [90, 20, 934, 1420], quad: [272, 425, 750, 425, 772, 884, 252, 884], next: [252, 1256, 771, 1412] };
+const LOSE = { w: 975, h: 1025, ad: [71, 771, 525, 949], gems: [541, 782, 920, 972], close: [824, 61, 954, 197] };
+/** Each popup button: its art, where it sits, when it pops in, and whether it breathes to invite a tap. */
+const POPUP_BUTTONS: Record<'win' | 'lose', { id: 'next' | 'ad' | 'gems' | 'close'; box: number[]; delay: number; breathe: boolean }[]> = {
+  win: [{ id: 'next', box: WIN.next, delay: 0.32, breathe: true }],
+  lose: [
+    { id: 'ad', box: LOSE.ad, delay: 0.26, breathe: true },
+    { id: 'gems', box: LOSE.gems, delay: 0.34, breathe: false },
+    { id: 'close', box: LOSE.close, delay: 0.42, breathe: false },
+  ],
+};
+
+function drawPopupButtons(L: { s: number; x: number; y: number }): void {
+  for (const b of POPUP_BUTTONS[outcome === 'win' ? 'win' : 'lose']) {
+    const img = ui[b.id];
+    if (!img) continue;
+    const [x0, y0, x1, y1] = b.box;
+    const enter = easeOutBack(Math.max(0, Math.min(1, (popupT - b.delay) / 0.3)));
+    if (enter <= 0) continue;
+    const k = enter * pressScale('p:' + b.id) * (b.breathe ? 1 + 0.035 * Math.sin(popupT * 5) : 1);
+    const cx = L.x + ((x0 + x1) / 2) * L.s, cy = L.y + ((y0 + y1) / 2) * L.s;
+    const w = (x1 - x0 + 1) * L.s * k, h = (y1 - y0 + 1) * L.s * k;
+    ctx.drawImage(img, cx - w / 2, cy - h / 2, w, h);
+  }
+}
+
+const popupPop = () => easeOutBack(Math.min(1, popupT / 0.35));
+
+/** Where the art sits on screen (CSS px): its scale and top-left, at full size. */
+function popupLayout(W: number, H: number): { s: number; x: number; y: number } {
+  if (outcome === 'win') {
+    const [x0, y0, x1, y1] = WIN.box;
+    const s = Math.min((W * 0.98) / (x1 - x0), (H * 0.98) / (y1 - y0));
+    return { s, x: W / 2 - ((x0 + x1) / 2) * s, y: H / 2 - ((y0 + y1) / 2) * s };
+  }
+  const s = Math.min((W * 0.94) / LOSE.w, (H * 0.8) / LOSE.h);
+  return { s, x: W / 2 - (LOSE.w / 2) * s, y: H * 0.48 - (LOSE.h / 2) * s };
+}
+
+function drawPopup(W: number, H: number, dpr: number): void {
+  const t = popupPop();
+  const L = popupLayout(W, H);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = `rgba(20,12,6,${0.62 * Math.min(1, popupT / 0.25)})`;
+  ctx.fillRect(0, 0, W, H);
+  // grow from the centre with a little overshoot
+  const cx = W / 2, cy = H / 2;
+  ctx.translate(cx, cy);
+  ctx.scale(t, t);
+  ctx.translate(-cx, -cy);
+  ctx.globalAlpha = Math.min(1, popupT / 0.15);
+  if (outcome === 'win') drawWinArt(L);
+  else if (ui.lose) ctx.drawImage(ui.lose, L.x, L.y, LOSE.w * L.s, LOSE.h * L.s);
+  drawPopupButtons(L);
+  ctx.globalAlpha = 1;
+}
+
+function drawWinArt(L: { s: number; x: number; y: number }): void {
+  if (!ui.win || !data) return;
+  // the finished picture, whole, fills the art's frame window
+  if (winPic?.level !== level) {
+    const c = document.createElement('canvas');
+    c.width = PIC_W;
+    c.height = PIC_H;
+    c.getContext('2d')!.putImageData(data.original, 0, 0);
+    winPic = { level, canvas: c };
+  }
+  const q = WIN.quad;
+  const P = (i: number) => [L.x + q[i] * L.s, L.y + q[i + 1] * L.s];
+  ctx.save();
+  ctx.beginPath();
+  for (let i = 0; i < q.length; i += 2) ctx.lineTo(P(i)[0], P(i)[1]);
+  ctx.closePath();
+  ctx.clip();
+  const qx0 = Math.min(q[0], q[6]), qx1 = Math.max(q[2], q[4]), qy0 = q[1], qy1 = q[5];
+  const side = Math.max(qx1 - qx0, qy1 - qy0) * L.s;
+  ctx.drawImage(winPic.canvas, L.x + ((qx0 + qx1) / 2) * L.s - side / 2, L.y + ((qy0 + qy1) / 2) * L.s - side / 2, side, side);
+  // a slow sheen across the glass
+  const sweep = ((popupT * 0.45) % 1.6) - 0.3;
+  const gx = L.x + (qx0 + (qx1 - qx0) * sweep) * L.s;
+  const g = ctx.createLinearGradient(gx - 60 * L.s, 0, gx + 60 * L.s, 0);
+  g.addColorStop(0, 'rgba(255,255,255,0)');
+  g.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(L.x + qx0 * L.s, L.y + qy0 * L.s, (qx1 - qx0) * L.s, (qy1 - qy0) * L.s);
+  ctx.restore();
+  ctx.drawImage(ui.win, L.x, L.y, WIN.w * L.s, WIN.h * L.s);
+}
+
+const inRect = (px: number, py: number, L: { s: number; x: number; y: number }, r: readonly number[]) =>
+  px >= L.x + r[0] * L.s && px <= L.x + r[2] * L.s && py >= L.y + r[1] * L.s && py <= L.y + r[3] * L.s;
+
+/** A tap while a popup is up (CSS px). */
+function popupTap(px: number, py: number): void {
+  if (popupT < 0.4 || clock - lastPopupAction < 0.5) return; // let it land; one action per press
+  const L = popupLayout(canvas.clientWidth, canvas.clientHeight);
+  const act = (id: string, fn: () => void) => {
+    // the button dips first, then the action runs
+    press('p:' + id);
+    lastPopupAction = clock;
+    setTimeout(fn, 140);
+  };
+  if (outcome === 'win') {
+    if (inRect(px, py, L, WIN.next)) act('next', () => startLevel((level + 1) % LEVEL_COUNT));
+    return;
+  }
+  const [x0, y0, x1, y1] = LOSE.close;
+  if (Math.hypot(px - (L.x + ((x0 + x1) / 2) * L.s), py - (L.y + ((y0 + y1) / 2) * L.s)) < ((x1 - x0) / 2) * L.s) { act('close', () => startLevel(level)); return; }
+  if (inRect(px, py, L, LOSE.ad)) { act('ad', () => void reviveWithAd()); return; }
+  // no gem wallet in this build: the gem price is shown, the revive is free
+  if (inRect(px, py, L, LOSE.gems)) act('gems', ownRevive);
+}
+
+async function reviveWithAd(): Promise<void> {
+  if (reviveBusy) return;
+  reviveBusy = true;
+  try {
+    // with the ads module off (standalone web / APK) there is no ad to show: revive straight away
+    if (FalconSDK.ads.enabled && !(await FalconSDK.ads.showRewarded())) return;
+    ownRevive();
+  } finally {
+    reviveBusy = false;
+  }
+}
+
+/** One more slot to keep going; when the queue is already at its widest, the level restarts. */
+function ownRevive(): void {
+  if (!revive()) startLevel(level);
 }
 
 let lastTime = performance.now();
@@ -1783,6 +2026,10 @@ function frame(now: number): void {
     update(dt * speed);
     updateWave(dt);
   }
+  popupT = outcome ? popupT + dt : 0;
+  for (const [id, t] of presses) { if (t > 1.2) presses.delete(id); else presses.set(id, t + dt); }
+  for (const p of taps) p.t += dt;
+  if (taps.length) taps = taps.filter((p) => p.t < 0.4);
   draw();
   requestAnimationFrame(frame);
 }
