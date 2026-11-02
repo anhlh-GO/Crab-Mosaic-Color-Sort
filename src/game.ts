@@ -605,7 +605,9 @@ function update(dt: number): void {
   // lost: every slot holds a box that can reach nothing, and no bite is coming that could open more
   const biting = crabs.some((c) => c.state === 'go' || c.state === 'bite');
   const busy = slots.some((t) => t && (t.state === 'fly' || !t.blocked));
-  const stuck = !biting && !hammer && !handFx && !busy && !anyTappable();
+  // never once the picture is gone: the last crabs are only carrying their shards home
+  const cleared = eatenCount === data.board.pieces.length;
+  const stuck = !cleared && !biting && !hammer && !handFx && !busy && !anyTappable();
   stuckT = stuck ? stuckT + dt : 0;
   if (stuckT > 0.6) finish('lose');
 }
