@@ -9,17 +9,21 @@ import type { Board } from './segment';
 import { Nav } from './nav';
 import { PICTURES, type Picture } from './pictures';
 
+/** Every level starts with this many free slots (Add Slot / Revive can add more, up to 7). */
+export const START_SLOTS = 5;
+
 export interface LevelDef {
   picture: Picture;
   /** Piece size in picture pixels: smaller = more pieces. */
   cell: number;
-  slots: number;
   columns: number;
   /** Tile sizes, rounded to 5. */
   minTile: number;
   maxTile: number;
   /** 0 = tiles are dealt in solving order, 1 = heavily shuffled, over a window of up to 4 rows. */
   shuffle: number;
+  /** Widens the shuffle window (default 1): boxes can be dealt further out of solving order. */
+  spread?: number;
   difficulty: 'easy' | 'normal' | 'hard';
   seed: number;
   /** Box blockers, see applyBlockers. */
@@ -40,59 +44,61 @@ export interface Blockers {
 }
 
 // Fifty levels on the usual puzzle sawtooth: easy onboarding (1-3), a hard spike every
-// fifth level, an easy breather right after it. Harder = smaller pieces (more of them),
-// bigger boxes, more columns to choose from and boxes dealt further out of solving order.
+// fifth level, an easy breather right after it. The tray always starts with 5 slots, so
+// difficulty comes from the deal: smaller pieces and boxes (more of them), more columns,
+// boxes dealt further out of solving order (shuffle, spread) and blockers. Tuned with
+// src/sim.ts: a random tapper wins ~55-85% of easy, ~25-45% of normal, ~10-20% of hard levels.
 export const LEVELS: LevelDef[] = [
-  { picture: PICTURES[0], cell: 44, slots: 5, columns: 2, minTile: 10, maxTile: 25, shuffle: 0.2, difficulty: 'easy', seed: 101 },
-  { picture: PICTURES[1], cell: 42, slots: 5, columns: 2, minTile: 10, maxTile: 25, shuffle: 0.2, difficulty: 'easy', seed: 202 },
-  { picture: PICTURES[2], cell: 40, slots: 4, columns: 3, minTile: 10, maxTile: 25, shuffle: 1, difficulty: 'easy', seed: 47817 },
-  { picture: PICTURES[3], cell: 38, slots: 3, columns: 3, minTile: 10, maxTile: 25, shuffle: 1, difficulty: 'normal', seed: 8323 },
-  { picture: PICTURES[4], cell: 36, slots: 3, columns: 3, minTile: 10, maxTile: 30, shuffle: 0.9, difficulty: 'hard', seed: 24262 },
-  { picture: PICTURES[5], cell: 38, slots: 3, columns: 3, minTile: 10, maxTile: 25, shuffle: 0.7, difficulty: 'easy', seed: 16444 },
-  { picture: PICTURES[6], cell: 35, slots: 5, columns: 3, minTile: 10, maxTile: 25, shuffle: 0.9, difficulty: 'normal', seed: 8626 },
-  { picture: PICTURES[7], cell: 34, slots: 4, columns: 4, minTile: 10, maxTile: 25, shuffle: 0.45, difficulty: 'normal', seed: 16646 },
-  { picture: PICTURES[8], cell: 33, slots: 3, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.2, difficulty: 'normal', seed: 56342 },
-  { picture: PICTURES[9], cell: 31, slots: 3, columns: 5, minTile: 5, maxTile: 15, shuffle: 0.7, difficulty: 'hard', seed: 8929 },
-  { picture: PICTURES[10], cell: 32, slots: 5, columns: 4, minTile: 10, maxTile: 25, shuffle: 1, difficulty: 'easy', seed: 9030 },
-  { picture: PICTURES[11], cell: 31, slots: 4, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.7, difficulty: 'normal', seed: 32888 },
-  { picture: PICTURES[12], cell: 30, slots: 3, columns: 4, minTile: 10, maxTile: 30, shuffle: 1, difficulty: 'normal', seed: 17151 },
-  { picture: PICTURES[13], cell: 30, slots: 4, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.9, difficulty: 'normal', seed: 33090 },
-  { picture: PICTURES[14], cell: 29, slots: 3, columns: 5, minTile: 15, maxTile: 40, shuffle: 1, difficulty: 'hard', seed: 49029 },
-  { picture: PICTURES[15], cell: 29, slots: 5, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.9, difficulty: 'normal', seed: 57049 },
-  { picture: PICTURES[16], cell: 28, slots: 3, columns: 5, minTile: 10, maxTile: 35, shuffle: 0.7, difficulty: 'normal', seed: 25474 },
-  { picture: PICTURES[17], cell: 28, slots: 4, columns: 5, minTile: 10, maxTile: 35, shuffle: 1, difficulty: 'normal', seed: 17656 },
-  { picture: PICTURES[18], cell: 27, slots: 4, columns: 5, minTile: 15, maxTile: 45, shuffle: 1, difficulty: 'hard', seed: 49433 },
-  { picture: PICTURES[19], cell: 27, slots: 3, columns: 5, minTile: 10, maxTile: 30, shuffle: 0.7, difficulty: 'hard', seed: 41615 },
-  { picture: PICTURES[20], cell: 27, slots: 4, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.3, difficulty: 'normal', seed: 2121, blockers: { mystery: 0.25 } },
-  { picture: PICTURES[21], cell: 27, slots: 3, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.4, difficulty: 'normal', seed: 25979, blockers: { mystery: 0.3 } },
-  { picture: PICTURES[22], cell: 27, slots: 3, columns: 4, minTile: 10, maxTile: 35, shuffle: 0.9, difficulty: 'normal', seed: 2323, blockers: { mystery: 0.35 } },
-  { picture: PICTURES[23], cell: 26, slots: 3, columns: 4, minTile: 10, maxTile: 35, shuffle: 0.7, difficulty: 'normal', seed: 26181, blockers: { mystery: 0.35 } },
-  { picture: PICTURES[24], cell: 26, slots: 3, columns: 5, minTile: 15, maxTile: 40, shuffle: 0.7, difficulty: 'hard', seed: 42120, blockers: { mystery: 0.4 } },
-  { picture: PICTURES[25], cell: 27, slots: 3, columns: 4, minTile: 25, maxTile: 60, shuffle: 1, difficulty: 'normal', seed: 18464, blockers: { ice: 3, iceMin: 3, iceMax: 5, mystery: 0.2 } },
-  { picture: PICTURES[26], cell: 26, slots: 3, columns: 4, minTile: 10, maxTile: 35, shuffle: 0.7, difficulty: 'normal', seed: 42322, blockers: { ice: 3, iceMin: 3, iceMax: 5, mystery: 0.2 } },
-  { picture: PICTURES[27], cell: 26, slots: 3, columns: 4, minTile: 10, maxTile: 35, shuffle: 0.9, difficulty: 'normal', seed: 2828, blockers: { ice: 3, iceMin: 3, iceMax: 5, mystery: 0.25 } },
-  { picture: PICTURES[28], cell: 26, slots: 3, columns: 5, minTile: 10, maxTile: 35, shuffle: 0.8, difficulty: 'normal', seed: 26686, blockers: { ice: 4, iceMin: 3, iceMax: 5, mystery: 0.25 } },
-  { picture: PICTURES[29], cell: 25, slots: 3, columns: 5, minTile: 20, maxTile: 50, shuffle: 0.9, difficulty: 'hard', seed: 26787, blockers: { ice: 6, iceMin: 4, iceMax: 7, mystery: 0.45 } },
-  { picture: PICTURES[30], cell: 26, slots: 5, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.3, difficulty: 'normal', seed: 42726, blockers: { chains: 1, ice: 2, iceMin: 3, iceMax: 4, mystery: 0.15 } },
-  { picture: PICTURES[31], cell: 26, slots: 3, columns: 4, minTile: 10, maxTile: 35, shuffle: 0.7, difficulty: 'normal', seed: 34908, blockers: { chains: 2, ice: 2, iceMin: 3, iceMax: 5, mystery: 0.2 } },
-  { picture: PICTURES[32], cell: 25, slots: 3, columns: 5, minTile: 20, maxTile: 50, shuffle: 0.3, difficulty: 'normal', seed: 27090, blockers: { chains: 2, ice: 3, iceMin: 3, iceMax: 5, mystery: 0.25 } },
-  { picture: PICTURES[33], cell: 25, slots: 3, columns: 5, minTile: 10, maxTile: 35, shuffle: 0.6, difficulty: 'normal', seed: 3434, blockers: { chains: 3, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.4 } },
-  { picture: PICTURES[34], cell: 25, slots: 4, columns: 5, minTile: 20, maxTile: 50, shuffle: 0.3, difficulty: 'hard', seed: 19373, blockers: { chains: 4, ice: 6, iceMin: 4, iceMax: 7, mystery: 0.45 } },
-  { picture: PICTURES[35], cell: 26, slots: 3, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.5, difficulty: 'easy', seed: 19474, blockers: { chains: 1, ice: 3, iceMin: 3, iceMax: 4, mystery: 0.3 } },
-  { picture: PICTURES[36], cell: 25, slots: 4, columns: 5, minTile: 10, maxTile: 35, shuffle: 0.7, difficulty: 'normal', seed: 35413, blockers: { chains: 2, ice: 3, iceMin: 3, iceMax: 5, mystery: 0.3 } },
-  { picture: PICTURES[37], cell: 25, slots: 5, columns: 5, minTile: 10, maxTile: 35, shuffle: 1, difficulty: 'normal', seed: 43433, blockers: { chains: 2, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.3 } },
-  { picture: PICTURES[38], cell: 24, slots: 5, columns: 5, minTile: 10, maxTile: 40, shuffle: 1, difficulty: 'normal', seed: 19777, blockers: { chains: 3, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.35 } },
-  { picture: PICTURES[39], cell: 24, slots: 3, columns: 5, minTile: 30, maxTile: 70, shuffle: 1, difficulty: 'hard', seed: 4040, blockers: { chains: 4, ice: 7, iceMin: 5, iceMax: 8, mystery: 0.5 } },
-  { picture: PICTURES[40], cell: 25, slots: 4, columns: 4, minTile: 10, maxTile: 35, shuffle: 1, difficulty: 'easy', seed: 43736, blockers: { chains: 1, ice: 1, iceMin: 3, iceMax: 3, mystery: 0.15 } },
-  { picture: PICTURES[41], cell: 25, slots: 4, columns: 5, minTile: 10, maxTile: 30, shuffle: 0.8, difficulty: 'normal', seed: 20080, blockers: { chains: 2, ice: 3, iceMin: 3, iceMax: 5, mystery: 0.3 } },
-  { picture: PICTURES[42], cell: 24, slots: 4, columns: 5, minTile: 10, maxTile: 40, shuffle: 1, difficulty: 'normal', seed: 36019, blockers: { chains: 2, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.3 } },
-  { picture: PICTURES[43], cell: 24, slots: 4, columns: 5, minTile: 10, maxTile: 40, shuffle: 0.6, difficulty: 'normal', seed: 4444, blockers: { chains: 3, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.35 } },
-  { picture: PICTURES[44], cell: 24, slots: 3, columns: 5, minTile: 15, maxTile: 45, shuffle: 0.6, difficulty: 'hard', seed: 4545, blockers: { chains: 2, ice: 4, iceMin: 4, iceMax: 5, mystery: 0.3 } },
-  { picture: PICTURES[45], cell: 25, slots: 3, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.4, difficulty: 'easy', seed: 28403, blockers: { chains: 1, ice: 3, iceMin: 3, iceMax: 4, mystery: 0.25 } },
-  { picture: PICTURES[46], cell: 24, slots: 3, columns: 5, minTile: 10, maxTile: 40, shuffle: 0.8, difficulty: 'normal', seed: 44342, blockers: { chains: 2, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.35 } },
-  { picture: PICTURES[47], cell: 24, slots: 3, columns: 5, minTile: 10, maxTile: 40, shuffle: 0.6, difficulty: 'normal', seed: 20686, blockers: { chains: 3, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.35 } },
-  { picture: PICTURES[48], cell: 23, slots: 4, columns: 5, minTile: 15, maxTile: 45, shuffle: 0.7, difficulty: 'normal', seed: 12868, blockers: { chains: 3, ice: 5, iceMin: 3, iceMax: 5, mystery: 0.4 } },
-  { picture: PICTURES[49], cell: 23, slots: 3, columns: 5, minTile: 20, maxTile: 50, shuffle: 1, difficulty: 'hard', seed: 36726, blockers: { chains: 5, ice: 8, iceMin: 5, iceMax: 8, mystery: 0.55 } },
+  { picture: PICTURES[0], cell: 44, columns: 2, minTile: 10, maxTile: 25, shuffle: 0.2, difficulty: 'easy', seed: 101 },
+  { picture: PICTURES[1], cell: 42, columns: 2, minTile: 10, maxTile: 25, shuffle: 0.2, difficulty: 'easy', seed: 202 },
+  { picture: PICTURES[2], cell: 40, columns: 3, minTile: 10, maxTile: 35, shuffle: 1, difficulty: 'easy', seed: 8406 },
+  { picture: PICTURES[3], cell: 38, columns: 3, minTile: 5, maxTile: 15, shuffle: 1, spread: 2, difficulty: 'normal', seed: 6243 },
+  { picture: PICTURES[4], cell: 36, columns: 3, minTile: 10, maxTile: 20, shuffle: 1, spread: 3, difficulty: 'hard', seed: 46982 },
+  { picture: PICTURES[5], cell: 38, columns: 4, minTile: 5, maxTile: 20, shuffle: 1, spread: 2, difficulty: 'easy', seed: 51921 },
+  { picture: PICTURES[6], cell: 32, columns: 3, minTile: 10, maxTile: 35, shuffle: 0.9, spread: 2, difficulty: 'normal', seed: 30092 },
+  { picture: PICTURES[7], cell: 31, columns: 5, minTile: 5, maxTile: 15, shuffle: 0.9, difficulty: 'normal', seed: 12759 },
+  { picture: PICTURES[8], cell: 30, columns: 5, minTile: 10, maxTile: 30, shuffle: 0.7, spread: 2.5, difficulty: 'normal', seed: 49053 },
+  { picture: PICTURES[9], cell: 27, columns: 5, minTile: 5, maxTile: 15, shuffle: 0.9, spread: 2, difficulty: 'hard', seed: 27316 },
+  { picture: PICTURES[10], cell: 32, columns: 5, minTile: 10, maxTile: 25, shuffle: 1, spread: 3, difficulty: 'easy', seed: 13470 },
+  { picture: PICTURES[11], cell: 30, columns: 4, minTile: 5, maxTile: 15, shuffle: 0.9, spread: 3, difficulty: 'normal', seed: 1580 },
+  { picture: PICTURES[12], cell: 28, columns: 4, minTile: 10, maxTile: 25, shuffle: 1, difficulty: 'normal', seed: 7730 },
+  { picture: PICTURES[13], cell: 28, columns: 4, minTile: 10, maxTile: 25, shuffle: 1, difficulty: 'normal', seed: 58641 },
+  { picture: PICTURES[14], cell: 29, columns: 5, minTile: 10, maxTile: 30, shuffle: 1, spread: 1.5, difficulty: 'hard', seed: 56553 },
+  { picture: PICTURES[15], cell: 29, columns: 5, minTile: 5, maxTile: 15, shuffle: 1, difficulty: 'normal', seed: 16245 },
+  { picture: PICTURES[16], cell: 27, columns: 5, minTile: 5, maxTile: 15, shuffle: 0.8, spread: 2.5, difficulty: 'normal', seed: 24303 },
+  { picture: PICTURES[17], cell: 24, columns: 5, minTile: 10, maxTile: 25, shuffle: 1, difficulty: 'normal', seed: 15999 },
+  { picture: PICTURES[18], cell: 25, columns: 5, minTile: 10, maxTile: 20, shuffle: 1, spread: 3, difficulty: 'hard', seed: 24295 },
+  { picture: PICTURES[19], cell: 24, columns: 5, minTile: 5, maxTile: 15, shuffle: 0.9, spread: 2.5, difficulty: 'hard', seed: 3428 },
+  { picture: PICTURES[20], cell: 23, columns: 4, minTile: 10, maxTile: 20, shuffle: 0.9, spread: 1.5, difficulty: 'normal', seed: 50853, blockers: { mystery: 0.28 } },
+  { picture: PICTURES[21], cell: 27, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.8, spread: 1.5, difficulty: 'normal', seed: 22935, blockers: { mystery: 0.35 } },
+  { picture: PICTURES[22], cell: 24, columns: 5, minTile: 5, maxTile: 20, shuffle: 1, difficulty: 'normal', seed: 4093, blockers: { mystery: 0.35 } },
+  { picture: PICTURES[23], cell: 26, columns: 5, minTile: 10, maxTile: 20, shuffle: 0.8, spread: 2, difficulty: 'normal', seed: 341, blockers: { mystery: 0.41 } },
+  { picture: PICTURES[24], cell: 24, columns: 5, minTile: 5, maxTile: 20, shuffle: 0.8, spread: 3, difficulty: 'hard', seed: 48783, blockers: { mystery: 0.5 } },
+  { picture: PICTURES[25], cell: 23, columns: 4, minTile: 10, maxTile: 20, shuffle: 1, spread: 2.5, difficulty: 'easy', seed: 39494, blockers: { ice: 3, iceMin: 3, iceMax: 5, mystery: 0.25 } },
+  { picture: PICTURES[26], cell: 26, columns: 4, minTile: 5, maxTile: 15, shuffle: 0.8, spread: 2.5, difficulty: 'normal', seed: 57450, blockers: { ice: 2, iceMin: 3, iceMax: 5, mystery: 0.25 } },
+  { picture: PICTURES[27], cell: 22, columns: 4, minTile: 5, maxTile: 20, shuffle: 1, spread: 3, difficulty: 'normal', seed: 21761, blockers: { ice: 4, iceMin: 3, iceMax: 5, mystery: 0.32 } },
+  { picture: PICTURES[28], cell: 26, columns: 5, minTile: 5, maxTile: 15, shuffle: 0.8, spread: 3, difficulty: 'normal', seed: 52880, blockers: { ice: 3, iceMin: 3, iceMax: 5, mystery: 0.28 } },
+  { picture: PICTURES[29], cell: 21, columns: 5, minTile: 10, maxTile: 25, shuffle: 0.9, spread: 2.5, difficulty: 'hard', seed: 46531, blockers: { ice: 6, iceMin: 4, iceMax: 7, mystery: 0.54 } },
+  { picture: PICTURES[30], cell: 26, columns: 4, minTile: 10, maxTile: 35, shuffle: 0.5, difficulty: 'normal', seed: 19256, blockers: { chains: 1, ice: 2, iceMin: 3, iceMax: 4, mystery: 0.15 } },
+  { picture: PICTURES[31], cell: 22, columns: 4, minTile: 10, maxTile: 35, shuffle: 0.9, spread: 2, difficulty: 'normal', seed: 8260, blockers: { chains: 2, ice: 3, iceMin: 3, iceMax: 5, mystery: 0.26 } },
+  { picture: PICTURES[32], cell: 25, columns: 5, minTile: 10, maxTile: 20, shuffle: 0.3, spread: 3, difficulty: 'normal', seed: 41032, blockers: { chains: 3, ice: 2, iceMin: 3, iceMax: 5, mystery: 0.31 } },
+  { picture: PICTURES[33], cell: 22, columns: 5, minTile: 10, maxTile: 30, shuffle: 0.8, spread: 2, difficulty: 'normal', seed: 12411, blockers: { chains: 4, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.52 } },
+  { picture: PICTURES[34], cell: 21, columns: 5, minTile: 10, maxTile: 35, shuffle: 0.5, spread: 1.5, difficulty: 'hard', seed: 27711, blockers: { chains: 3, ice: 4, iceMin: 4, iceMax: 7, mystery: 0.45 } },
+  { picture: PICTURES[35], cell: 26, columns: 4, minTile: 10, maxTile: 30, shuffle: 0.5, spread: 2, difficulty: 'easy', seed: 20159, blockers: { chains: 1, ice: 3, iceMin: 3, iceMax: 4, mystery: 0.34 } },
+  { picture: PICTURES[36], cell: 21, columns: 5, minTile: 5, maxTile: 20, shuffle: 0.9, spread: 3, difficulty: 'normal', seed: 16720, blockers: { chains: 2, ice: 3, iceMin: 3, iceMax: 5, mystery: 0.32 } },
+  { picture: PICTURES[37], cell: 25, columns: 5, minTile: 10, maxTile: 35, shuffle: 1, difficulty: 'normal', seed: 43433, blockers: { chains: 2, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.3 } },
+  { picture: PICTURES[38], cell: 21, columns: 5, minTile: 5, maxTile: 20, shuffle: 1, spread: 3, difficulty: 'normal', seed: 15669, blockers: { chains: 3, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.35 } },
+  { picture: PICTURES[39], cell: 21, columns: 5, minTile: 10, maxTile: 20, shuffle: 1, difficulty: 'hard', seed: 48830, blockers: { chains: 4, ice: 5, iceMin: 5, iceMax: 8, mystery: 0.6 } },
+  { picture: PICTURES[40], cell: 21, columns: 4, minTile: 10, maxTile: 20, shuffle: 1, spread: 2.5, difficulty: 'easy', seed: 24635, blockers: { chains: 1, ice: 1, iceMin: 3, iceMax: 3, mystery: 0.21 } },
+  { picture: PICTURES[41], cell: 25, columns: 5, minTile: 5, maxTile: 15, shuffle: 0.9, spread: 2, difficulty: 'normal', seed: 26771, blockers: { chains: 2, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.37 } },
+  { picture: PICTURES[42], cell: 23, columns: 5, minTile: 10, maxTile: 40, shuffle: 1, difficulty: 'normal', seed: 54708, blockers: { chains: 2, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.36 } },
+  { picture: PICTURES[43], cell: 21, columns: 5, minTile: 10, maxTile: 40, shuffle: 0.8, spread: 1.5, difficulty: 'normal', seed: 47642, blockers: { chains: 3, ice: 3, iceMin: 3, iceMax: 5, mystery: 0.42 } },
+  { picture: PICTURES[44], cell: 24, columns: 5, minTile: 5, maxTile: 15, shuffle: 1, spread: 2, difficulty: 'hard', seed: 55980, blockers: { chains: 1, ice: 4, iceMin: 4, iceMax: 5, mystery: 0.36 } },
+  { picture: PICTURES[45], cell: 25, columns: 5, minTile: 10, maxTile: 35, shuffle: 0.9, spread: 2, difficulty: 'easy', seed: 49886, blockers: { chains: 1, ice: 3, iceMin: 3, iceMax: 4, mystery: 0.33 } },
+  { picture: PICTURES[46], cell: 21, columns: 5, minTile: 5, maxTile: 20, shuffle: 0.9, difficulty: 'normal', seed: 22646, blockers: { chains: 1, ice: 5, iceMin: 3, iceMax: 5, mystery: 0.4 } },
+  { picture: PICTURES[47], cell: 24, columns: 5, minTile: 10, maxTile: 40, shuffle: 1, difficulty: 'normal', seed: 30485, blockers: { chains: 2, ice: 4, iceMin: 3, iceMax: 5, mystery: 0.36 } },
+  { picture: PICTURES[48], cell: 20, columns: 5, minTile: 5, maxTile: 20, shuffle: 0.9, spread: 2, difficulty: 'normal', seed: 45557, blockers: { chains: 4, ice: 7, iceMin: 3, iceMax: 5, mystery: 0.54 } },
+  { picture: PICTURES[49], cell: 19, columns: 5, minTile: 10, maxTile: 20, shuffle: 1, spread: 2, difficulty: 'hard', seed: 12036, blockers: { chains: 5, ice: 9, iceMin: 5, iceMax: 8, mystery: 0.6 } },
 ];
 
 export function rng(seed: number): () => number {
@@ -174,7 +180,7 @@ export function dealTiles(board: Board, def: LevelDef, nav: Nav): TileDef[][] {
   }
 
   // light shuffle inside a sliding window: later tiles may jump a little forward
-  const window = Math.round(def.columns * (1 + def.shuffle * 3));
+  const window = Math.round(def.columns * (1 + def.shuffle * 3) * (def.spread ?? 1));
   for (let i = 0; i < seq.length; i++) {
     if (rand() >= def.shuffle) continue;
     const j = Math.min(seq.length - 1, i + 1 + Math.floor(rand() * window));

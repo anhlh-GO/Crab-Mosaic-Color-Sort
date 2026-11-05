@@ -23,7 +23,7 @@
 import { createFalconEvents, type FalconBoosterDef, type FalconGame } from './falcon-game';
 import { segment, type Board } from './segment';
 import { Nav, NAV } from './nav';
-import { LEVELS, dealTiles, type TileDef } from './levels';
+import { LEVELS, START_SLOTS, dealTiles, type TileDef } from './levels';
 import { PIC_W, PIC_H, loadPictures } from './pictures';
 import FalconSDK from '@falcongames/game-client-sdk';
 import bgUrl from './assets/bg.jpg';
@@ -352,7 +352,7 @@ function setupLevel(): void {
   regionLeft = board.regions.map((r) => r.pieces.length);
   regionSpot = board.regions.map(() => null);
   regionPulse = board.regions.map(() => 0);
-  slots = new Array(def.slots).fill(null);
+  slots = new Array(START_SLOTS).fill(null);
   const byId = new Map<number, Tile>();
   columns = data.columns.map((col) => col.map((d) => { const t = newTile(d); if (d.id !== undefined) byId.set(d.id, t); return t; }));
   data.columns.forEach((col, j) => col.forEach((d, k) => { if (d.link !== undefined) columns[j][k].link = byId.get(d.link) ?? null; }));
